@@ -3,13 +3,11 @@ gi.require_version('Gst', '1.0')
 from gi.repository import Gst, GLib
 import socket
 import logging
-from rpividctrl_lib.constants import REMOTE_CONTROL_PORT, RTP_PORT
-from rpividctrl_lib.messaging import MessageType, SocketManager, MessageBuilder
-
-Gst.init(None)
+from rpividctrl_lib.messaging import REMOTE_CONTROL_PORT, RTP_PORT, MessageType, SocketManager, MessageBuilder, AnnotationMode, DRCLevel
 
 logging.basicConfig(level=logging.DEBUG, format='[%(levelname)s %(name)s] %(message)s')
 logger = logging.getLogger('rpividctrl_server')
+
 
 class Main:
     def __init__(self, host=''):
@@ -19,31 +17,32 @@ class Main:
         self.pipeline = Gst.Pipeline.new()
 
         self.pipeline.get_bus().add_signal_watch()
-        self.pipeline.get_bus().connect('message::eos', self.on_eos)
+        self.pipeline.get_bus().connect('message::eos', self.on_eos)  # eos==end of stream -- should never happen
         self.pipeline.get_bus().connect('message::error', self.on_error)
 
-        self.camsrc = Gst.ElementFactory.make('v4l2src', 'camsrc')
-        self.camsrc.set_property('device', '/dev/video0')
+        self.annotation_mode = AnnotationMode.NONE
+        self.drc_level = DRCLevel.OFF
+        self.camsrc = self.generate_camsrc()
         self.pipeline.add(self.camsrc)
 
-        self.camsrc_caps_filter = Gst.ElementFactory.make('capsfilter')
-        self.camsrc_caps_filter.set_property('caps',
-                                             Gst.Caps.from_string('video/x-raw,width=640,height=480,framerate=15/1'))
+        self.width = 640
+        self.height = 480
+        self.framerate = 60
+        self.camsrc_caps_filter = self.generate_camsrc_capsfilter()
         self.pipeline.add(self.camsrc_caps_filter)
         self.camsrc.link(self.camsrc_caps_filter)
 
-        convert = Gst.ElementFactory.make('videoconvert')
-        self.pipeline.add(convert)
-        self.camsrc_caps_filter.link(convert)
+        self.convert = Gst.ElementFactory.make('videoconvert')
+        self.pipeline.add(self.convert)
+        self.camsrc_caps_filter.link(self.convert)
 
         self.queue0 = Gst.ElementFactory.make('queue')
         self.pipeline.add(self.queue0)
-        convert.link(self.queue0)
+        self.convert.link(self.queue0)
 
-        self.h264enc = Gst.ElementFactory.make('omxh264enc')
-        self.h264enc.set_property('b-frames', 0)
-        self.h264enc.set_property('control-rate', 'variable')
-        self.h264enc.set_property('target-bitrate', 1000000)
+        self.target_bitrate = 1000000
+
+        self.h264enc = self.generate_h264enc()
         self.pipeline.add(self.h264enc)
         self.queue0.link(self.h264enc)
 
@@ -57,6 +56,7 @@ class Main:
 
         self.udpsink = Gst.ElementFactory.make('udpsink')
         self.udpsink.set_property('port', RTP_PORT)
+        self.udpsink.set_property('sync', False)
         self.pipeline.add(self.udpsink)
         self.rtph264pay.link(self.udpsink)
 
@@ -86,7 +86,7 @@ class Main:
             self.sock_manager.destroy()
             self.sock_manager = None
         self.set_dest_host(addr[0])
-        self.resume()
+        # do not need to resume the pipeline here, because the client will send a SET_RESOLUTION_FRAMERATE command which will resume it
         self.sock_manager = SocketManager(conn)
         self.sock_manager.on_destroy = self.on_sock_destroy
         self.sock_manager.on_read_message = self.handle_message
@@ -109,15 +109,83 @@ class Main:
         elif message_type == MessageType.RESUME:
             self.resume()
         elif message_type == MessageType.PING:
-            self.sock_manager.sendall(MessageBuilder().pong().generate())
+            self.sock_manager.sendall(MessageBuilder.PONG)
+        elif message_type == MessageType.SET_ANNOTATION_MODE:
+            self.set_annotation_mode(message_info['annotation_mode'])
+        elif message_type == MessageType.SET_DRC_LEVEL:
+            self.set_drc_level(message_info['drc_level'])
+        elif message_type == MessageType.SET_TARGET_BITRATE:
+            self.set_target_bitrate(message_info['target_bitrate'])
+        else:
+            logger.warning(f'do not know how to handle message type {message_type}')
 
     def set_dest_host(self, host):
         self.udpsink.set_property('host', host)
 
-    def set_resolution_framerate(self, width, height, framerate):
-        logger.info(f'set width {width}, height {height}, framerate {framerate}')
-        caps_str = f'video/x-raw,width={width},height={height},framerate={framerate}/1'
-        self.camsrc_caps_filter.set_property('caps', Gst.Caps.from_string(caps_str))
+    def generate_camsrc(self):
+        new_camsrc = Gst.ElementFactory.make('rpicamsrc')
+        new_camsrc.set_property('annotation_mode', self.annotation_mode)
+        new_camsrc.set_property('drc', int(self.drc_level))
+        return new_camsrc
+
+    def generate_camsrc_capsfilter(self):
+        new_camsrc_capsfilter = Gst.ElementFactory.make('capsfilter')
+        caps_str = f'video/x-raw,width={self.width},height={self.height},framerate={self.framerate}/1'
+        caps = Gst.Caps.from_string(caps_str)
+        new_camsrc_capsfilter.set_property('caps', caps)
+        return new_camsrc_capsfilter
+
+    def generate_h264enc(self):
+        h264enc = Gst.ElementFactory.make('omxh264enc')
+        h264enc.set_property('b-frames', 0)
+        h264enc.set_property('control-rate', 'variable')  # fails with 'constant'
+        h264enc.set_property('target-bitrate', self.target_bitrate)
+        return h264enc
+
+    def set_resolution_framerate(self, new_width, new_height, new_framerate):
+        """Changes the resolution and framerate, and resumes the pipeline"""
+
+        if new_width == self.width and new_height == self.height and new_framerate == self.framerate:
+            logger.info(f'not changing width, height, framerate, because it would be the same')
+        else:
+            self.width = new_width
+            self.height = new_height
+            self.framerate = new_framerate
+
+            logger.info(f'set width {self.width}, height {self.height}, framerate {self.framerate}')
+
+            # we need to remove the rpicamsrc element and the following CapsFilter, and then insert new ones into the pipeline
+            # I tried keeping the same elements and changing the properties, but it fails with an error like
+            # "/GstPipeline:pipeline0/GstRpiCamSrc:src: Waiting for a buffer from the camera took too long"
+
+            self.pipeline.set_state(Gst.State.NULL)
+            self.camsrc.unlink(self.camsrc_caps_filter)
+            self.camsrc_caps_filter.unlink(self.queue0)
+            self.pipeline.remove(self.camsrc)
+            self.pipeline.remove(self.camsrc_caps_filter)
+
+            self.camsrc = self.generate_camsrc()
+            self.pipeline.add(self.camsrc)
+
+            self.camsrc_caps_filter = self.generate_camsrc_capsfilter()
+            self.pipeline.add(self.camsrc_caps_filter)
+            self.camsrc.link(self.camsrc_caps_filter)
+            self.camsrc_caps_filter.link(self.convert)
+
+        self.pipeline.set_state(Gst.State.PLAYING)
+
+    def set_annotation_mode(self, annotation_mode):
+        self.annotation_mode = annotation_mode
+        self.camsrc.set_property('annotation_mode', int(self.annotation_mode))
+
+    def set_drc_level(self, drc_level):
+        self.drc_level = drc_level
+        self.camsrc.set_property('drc', int(self.drc_level))
+
+    def set_target_bitrate(self, bitrate):
+        logger.info(f'set target bitrate {bitrate}')
+        self.target_bitrate = bitrate
+        self.h264enc.set_property('target-bitrate', bitrate)
 
     def run(self):
         logger.info('run')
@@ -137,6 +205,8 @@ class Main:
         self.pipeline.set_state(Gst.State.PAUSED)
 
 
-start = Main()
-start.run()
-start.resume()
+if __name__ == '__main__':
+    Gst.init(None)
+    start = Main()
+    start.run()
+    start.resume()
