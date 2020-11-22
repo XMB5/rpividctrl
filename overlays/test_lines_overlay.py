@@ -13,7 +13,7 @@ class TestLinesOverlay(Overlay):
         ctx.set_source_rgb(1, 0, 0)
         ctx.save()
         ctx.set_line_width(10)
-        ctx.move_to(Overlay.CTX_WIDTH / 1 / 3, Overlay.CTX_HEIGHT)
+        ctx.move_to(Overlay.CTX_WIDTH * 1 / 3, Overlay.CTX_HEIGHT)
         ctx.line_to(Overlay.CTX_WIDTH * 4 / 9, Overlay.CTX_HEIGHT / 3)
         ctx.stroke()
         ctx.restore()  # line width will be back to previous
