@@ -3,12 +3,16 @@
 set -e
 set -o pipefail
 
+# param 1 (optional): gstshark tracers to use, semicolon separated
+# RPIVIDCTRL_SSH: ssh remote host, example: pi@10.0.0.92
+# GSTSHARK_GRAPHICS_DIR: path of gst-shark/scripts/graphics directory
+
 if [ -z "$RPIVIDCTRL_SSH" ]; then
   echo 'pass server ssh address in RPIVIDCTRL_SSH environment variable, example: pi@10.2.39.47' >&2
   exit 1
 fi
 
-TRACERS="${1:-'interlatency'}"
+TRACERS="${1:-interlatency;proctime;bitrate;queuelevel;framerate}"
 
 RPIVIDCTRL_DEBUG_DIR="$(dirname "$(readlink -f "$0")")"
 # shellcheck source=./plot.sh

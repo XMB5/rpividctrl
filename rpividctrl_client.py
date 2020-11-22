@@ -374,7 +374,7 @@ class VideoAppWindow(Gtk.ApplicationWindow):
         width = settings.get('width') or 320
         height = settings.get('height') or 240
         framerate = settings.get('framerate') or 30
-        default_h264_decoder = Gst.ElementFactory.find(settings.get('h264_decoder_name') or 'avdec_h264')  # avdec_h264 is software h264 decoder
+        default_h264_decoder = Gst.ElementFactory.find(settings.get('h264_decoder') or 'avdec_h264')  # avdec_h264 is software h264 decoder
         annotation_mode_str = settings.get('annotation_mode') or 'none'
         drc_level_str = settings.get('drc_level') or 'off'
         target_birtate_str = settings.get('target_bitrate') or '1M'

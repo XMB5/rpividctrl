@@ -1,6 +1,7 @@
 {
   "ip_address": "10.0.0.253",
-  "width": 160,
-  "height": 120,
-  "framerate": 120
+  "width": 640,
+  "height": 480,
+  "framerate": 90,
+  "h264_decoder": "vaapih264dec"
 }
