@@ -46,9 +46,14 @@ class Main:
         self.pipeline.add(self.h264enc)
         self.queue0.link(self.h264enc)
 
+        self.h264enc_caps_filter = Gst.ElementFactory.make('capsfilter')
+        self.h264enc_caps_filter.set_property('caps', Gst.Caps.from_string('video/x-h264,colorimetry=bt709'))
+        self.pipeline.add(self.h264enc_caps_filter)
+        self.h264enc.link(self.h264enc_caps_filter)
+
         self.queue1 = Gst.ElementFactory.make('queue')
         self.pipeline.add(self.queue1)
-        self.h264enc.link(self.queue1)
+        self.h264enc_caps_filter.link(self.queue1)
 
         self.rtph264pay = Gst.ElementFactory.make('rtph264pay')
         self.pipeline.add(self.rtph264pay)

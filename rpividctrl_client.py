@@ -7,9 +7,9 @@ import logging
 from rpividctrl_lib.messaging import REMOTE_CONTROL_PORT, RTP_PORT, MessageBuilder, SocketManager, MessageType, AnnotationMode, DRCLevel
 import time
 import cairo
-import math
 import json
 from argparse import ArgumentParser
+from overlay import Overlay
 
 logging.basicConfig(level=logging.DEBUG, format='[%(levelname)s %(name)s] %(message)s')
 logger = logging.getLogger('rpividctrl_client')
@@ -21,14 +21,17 @@ class VideoWidget(Gtk.Overlay):
     def __init__(self, h264dec_factory=None, **kwargs):
         super().__init__(**kwargs)
 
-        self.rtph264depay = None
         self.rtpjitterbuffer = None
+        self.rtph264depay = None
+        self.h264_caps_filter = None
         self.h264dec = None
         self.videoconvert = None
         self.imagesink = None
         self.imagesink_widget = None
 
         self.h264dec_factory = h264dec_factory
+
+        self.overlay = None
 
         self.connect('realize', self.on_realize)
         self.set_size_request(160, 120)
@@ -54,6 +57,11 @@ class VideoWidget(Gtk.Overlay):
         self.pipeline.add(self.rtph264depay)
         self.rtpjitterbuffer.link(self.rtph264depay)
 
+        self.h264_caps_filter = Gst.ElementFactory.make('capsfilter')
+        self.h264_caps_filter.set_property('caps', Gst.Caps.from_string('video/x-h264,colorimetry=bt709'))
+        self.pipeline.add(self.h264_caps_filter)
+        self.rtph264depay.link(self.h264_caps_filter)
+
         # testsrc = Gst.ElementFactory.make('videotestsrc')
         # self.pipeline.add(testsrc)
         #
@@ -68,7 +76,7 @@ class VideoWidget(Gtk.Overlay):
 
         self.h264dec = self.create_h264_decoder()
         self.pipeline.add(self.h264dec)
-        self.rtph264depay.link(self.h264dec)
+        self.h264_caps_filter.link(self.h264dec)
 
         self.videoconvert = Gst.ElementFactory.make('videoconvert')
         self.pipeline.add(self.videoconvert)
@@ -119,16 +127,22 @@ class VideoWidget(Gtk.Overlay):
 
         self.pipeline.set_state(Gst.State.NULL)
 
-        self.rtph264depay.unlink(self.h264dec)
+        self.h264_caps_filter.unlink(self.h264dec)
         self.h264dec.unlink(self.videoconvert)
         self.pipeline.remove(self.h264dec)
 
         self.h264dec = self.create_h264_decoder()
         self.pipeline.add(self.h264dec)
-        self.rtph264depay.link(self.h264dec)
+        self.h264_caps_filter.link(self.h264dec)
         self.h264dec.link(self.videoconvert)
 
         self.pipeline.set_state(Gst.State.PLAYING)
+
+    def set_overlay_class(self, overlay_cls):
+        if overlay_cls is None:
+            self.overlay = None
+        else:
+            self.overlay = overlay_cls()
 
     def draw(self, drawing_area, ctx: cairo.Context):
         # draws the overlay
@@ -138,6 +152,9 @@ class VideoWidget(Gtk.Overlay):
         # we need to find the dimensions of the video and the dimensions of the available
         # space so that we can calculate where we should draw the overlay so it goes over
         # the video frame
+
+        if self.overlay is None:
+            return
 
         # first, get last video frame
         last_sample = self.imagesink.get_property('last_sample')
@@ -180,23 +197,14 @@ class VideoWidget(Gtk.Overlay):
             vid_x = 0
             vid_y = (allocated_height - vid_height) / 2
 
-        # now, we choose dimensions we want to work with
-        ctx_width = 640
-        ctx_height = 480
-
-        # and we transform ctx so that we can use
+        # we transform ctx so that we can use
         # (0, 0) -> top left of video stream, and
-        # (ctx_width, ctx_height) -> bottom right of video stream
+        # (Overlay.CTX_WIDTH, Overlay.CTX_HEIGHT) -> bottom right of video stream
         ctx.translate(vid_x, vid_y)
-        ctx.scale(vid_width / ctx_width, vid_height / ctx_height)
+        ctx.scale(vid_width / Overlay.CTX_WIDTH, vid_height / Overlay.CTX_HEIGHT)
 
         # now we can use ctx
-        # cairo.Context docs: https://pycairo.readthedocs.io/en/latest/reference/context.html
-
-        ctx.set_source_rgb(1, 0, 0)
-        ctx.translate(320, 240)
-        ctx.arc(0, 0, 20, 0, 2 * math.pi)
-        ctx.stroke()
+        self.overlay.draw(ctx)
 
 
 class RemoteControl:
@@ -370,7 +378,8 @@ class VideoAppWindow(Gtk.ApplicationWindow):
         annotation_mode_str = settings.get('annotation_mode') or 'none'
         drc_level_str = settings.get('drc_level') or 'off'
         target_birtate_str = settings.get('target_bitrate') or '1M'
-        
+        chosen_overlay_display_name = settings.get('overlay')
+
         self.remote_control = RemoteControl(self.remote_control_status_change, self.remote_control_ping_update)
 
         self.prev_success_pkts = 0
@@ -576,6 +585,26 @@ class VideoAppWindow(Gtk.ApplicationWindow):
         h264_decoder_combobox.connect('changed', self.on_h264_decoder_changed)
         local_bar.add(h264_decoder_combobox)
 
+        # overlays
+        overlays_store = Gtk.ListStore(str, object)
+        overlays_store.append(['none', None])
+        for overlay_cls in Overlay.list_plugins():
+            overlays_store.append([overlay_cls.get_display_name(), overlay_cls])
+        overlay_combobox = Gtk.ComboBox.new_with_model(overlays_store)
+        if chosen_overlay_display_name is None:
+            overlay_combobox.set_active(0)
+        else:
+            for i, overlay_info in enumerate(overlays_store):
+                if overlay_info[0] == chosen_overlay_display_name:
+                    overlay_combobox.set_active(i)
+                    self.video.set_overlay_class(overlay_info[1])
+                    break
+        overlay_renderer = Gtk.CellRendererText()
+        overlay_combobox.pack_start(overlay_renderer, True)
+        overlay_combobox.add_attribute(overlay_renderer, 'text', 0)
+        overlay_combobox.connect('changed', self.on_overlay_changed)
+        local_bar.add(overlay_combobox)
+
         self.grid.attach_next_to(local_bar, self.video, Gtk.PositionType.BOTTOM, 1, 1)
 
         self.remote_control.connect()
@@ -645,6 +674,11 @@ class VideoAppWindow(Gtk.ApplicationWindow):
         h264_decoder_name, element_factory = combobox.get_model()[combobox.get_active_iter()]
         logger.info(f'h264 decoder changed to {h264_decoder_name}')
         self.video.change_h264_decoder(element_factory)
+
+    def on_overlay_changed(self, combobox):
+        overlay_display_name, overlay_cls = combobox.get_model()[combobox.get_active_iter()]
+        logger.info(f'overlay changed to {overlay_display_name}')
+        self.video.set_overlay_class(overlay_cls)
 
     def on_play_clicked(self, button):
         logger.info('play clicked')
