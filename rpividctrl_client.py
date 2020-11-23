@@ -10,6 +10,8 @@ import cairo
 import json
 from argparse import ArgumentParser
 from overlay import Overlay
+from common import get_pad, STATS_BUFFER_LEN
+import collections
 
 logging.basicConfig(level=logging.DEBUG, format='[%(levelname)s %(name)s] %(message)s')
 logger = logging.getLogger('rpividctrl_client')
@@ -20,6 +22,8 @@ class VideoWidget(Gtk.Overlay):
 
     def __init__(self, h264dec_factory=None, **kwargs):
         super().__init__(**kwargs)
+
+        self.stats_buffer = collections.deque(maxlen=STATS_BUFFER_LEN)
 
         self.rtpjitterbuffer = None
         self.rtph264depay = None
@@ -41,6 +45,8 @@ class VideoWidget(Gtk.Overlay):
 
         udpsrc = Gst.ElementFactory.make('udpsrc')
         udpsrc.set_property('port', RTP_PORT)
+        udpsrc_pad = get_pad(udpsrc.iterate_src_pads())
+        udpsrc_pad.add_probe(Gst.PadProbeType.BUFFER, self.udpsrc_probe)
         self.pipeline.add(udpsrc)
 
         udpsrc_caps_filter = Gst.ElementFactory.make('capsfilter')
@@ -84,6 +90,8 @@ class VideoWidget(Gtk.Overlay):
 
         self.imagesink = Gst.ElementFactory.make('gtksink')
         self.imagesink.set_property('sync', False)
+        buffer_processed_pad = get_pad(self.imagesink.iterate_sink_pads())
+        buffer_processed_pad.add_probe(Gst.PadProbeType.EVENT_DOWNSTREAM, self.buffer_processed_probe)
         self.pipeline.add(self.imagesink)
         self.videoconvert.link(self.imagesink)
 
@@ -110,6 +118,26 @@ class VideoWidget(Gtk.Overlay):
     def on_error(self, bus, message):
         parsed_error = message.parse_error()
         logger.error(f'gstreamer error: {parsed_error.gerror}\nAdditional debug info:\n{parsed_error.debug}')
+
+    def udpsrc_probe(self, pad, probe_info):
+        event_structure = Gst.Structure.new_empty('udpsrc_time')
+        event_structure.set_value('time', time.monotonic())
+        pad.get_peer().send_event(Gst.Event.new_custom(Gst.EventType.CUSTOM_DOWNSTREAM, event_structure))
+        return Gst.PadProbeReturn.OK
+
+    def buffer_processed_probe(self, pad, probe_info):
+        event = probe_info.get_event()
+        if event.type == Gst.EventType.CUSTOM_DOWNSTREAM:
+            structure = event.get_structure()
+            if structure.has_name('udpsrc_time'):
+                camsrc_time = event.get_structure().get_value('time')
+                now = time.monotonic()
+                time_diff = now - camsrc_time
+                self.measure_stats(time_diff)
+        return Gst.PadProbeReturn.OK
+
+    def measure_stats(self, last_pipeline_latency):
+        self.stats_buffer.append((last_pipeline_latency, ))
 
     def create_h264_decoder(self):
         decoder = self.h264dec_factory.create()
@@ -532,8 +560,8 @@ class VideoAppWindow(Gtk.ApplicationWindow):
         self.connection_status_label = Gtk.Label()
         remote_bar.add(self.connection_status_label)
 
-        self.stats_label = Gtk.Label()
-        remote_bar.add(self.stats_label)
+        self.remote_stats_label = Gtk.Label()
+        remote_bar.add(self.remote_stats_label)
 
         self.grid.attach(remote_bar, 0, 0, 1, 1)
 
@@ -604,6 +632,10 @@ class VideoAppWindow(Gtk.ApplicationWindow):
         overlay_combobox.connect('changed', self.on_overlay_changed)
         local_bar.add(overlay_combobox)
 
+        # stats label
+        self.local_stats_label = Gtk.Label()
+        local_bar.add(self.local_stats_label)
+
         self.grid.attach_next_to(local_bar, self.video, Gtk.PositionType.BOTTOM, 1, 1)
 
         self.remote_control.connect()
@@ -615,7 +647,7 @@ class VideoAppWindow(Gtk.ApplicationWindow):
             if reason:
                 label_str += ': ' + reason
             self.connection_status_label.set_label(label_str)
-            self.stats_label.set_label('')
+            self.remote_stats_label.set_label('')
         elif status == RemoteControl.STATUS_CONNECTING:
             self.connection_status_label.set_label('connecting')
         elif status == RemoteControl.STATUS_CONNECTED:
@@ -623,6 +655,8 @@ class VideoAppWindow(Gtk.ApplicationWindow):
 
     def remote_control_stats_update(self, rtt, stats_tuple):
         # event triggered when stats are updated
+
+        # remote stats
         rtt_ms = rtt * 1e3
 
         packet_stats = self.video.rtpjitterbuffer.get_property('stats')
@@ -634,12 +668,19 @@ class VideoAppWindow(Gtk.ApplicationWindow):
         remote_pipeline_latency_ms = stats_tuple[0] * 1e3
         remote_pipeline_queues = (stats_tuple[1] + stats_tuple[2]) / 2
 
-        self.stats_label.set_label(f'{rtt_ms:.1f} ms rtt, {remote_pipeline_latency_ms:.1f} ms pipeline, {remote_pipeline_queues:.3f} queue lvl, {new_failure_pkts} pkt fail, {new_success_pkts} pkt success')
-
-        logger.info(f'stats tuple {stats_tuple}')
+        self.remote_stats_label.set_label(f'{rtt_ms:.1f} ms rtt, {remote_pipeline_latency_ms:.1f} ms pipeline, {remote_pipeline_queues:.3f} queue lvl, {new_failure_pkts} pkt fail, {new_success_pkts} pkt success')
 
         self.prev_success_pkts = success_pkts
         self.prev_failure_pkts = failure_pkts
+
+        # local stats
+        local_stats_buffer_len = len(self.video.stats_buffer)
+        local_pipeline_latency_sum = 0
+        for latency, in self.video.stats_buffer:
+            local_pipeline_latency_sum += latency
+        local_pipeline_latency_ms = local_pipeline_latency_sum / local_stats_buffer_len * 1e3 if local_stats_buffer_len > 0 else 0
+        self.local_stats_label.set_label(f'{local_pipeline_latency_ms:.1f} ms pipeline')
+
 
     def on_ip_address_changed(self, entry):
         # when the user types in the ip address textbox

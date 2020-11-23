@@ -6,18 +6,10 @@ import logging
 from rpividctrl_lib.messaging import REMOTE_CONTROL_PORT, RTP_PORT, MessageType, SocketManager, MessageBuilder, AnnotationMode, DRCLevel
 import time
 import collections
+from common import get_pad, STATS_BUFFER_LEN
 
 logging.basicConfig(level=logging.DEBUG, format='[%(levelname)s %(name)s] %(message)s')
 logger = logging.getLogger('rpividctrl_server')
-
-
-def get_pad(pads_iterator):
-    while True:
-        iterator_result, item = pads_iterator.next()
-        if isinstance(item, Gst.Pad):
-            return item
-        if iterator_result == Gst.IteratorResult.DONE:
-            raise ValueError('could not find pad from iterator')
 
 
 class Main:
@@ -73,7 +65,7 @@ class Main:
         self.udpsink = Gst.ElementFactory.make('udpsink')
         self.udpsink.set_property('port', RTP_PORT)
         self.udpsink.set_property('sync', False)
-        self.stats_buffer = collections.deque(maxlen=50)  # will average last 50 readings
+        self.stats_buffer = collections.deque(maxlen=STATS_BUFFER_LEN)
         buffer_processed_pad = get_pad(self.udpsink.iterate_sink_pads())
         buffer_processed_pad.add_probe(Gst.PadProbeType.EVENT_DOWNSTREAM, self.buffer_processed_probe)
         self.pipeline.add(self.udpsink)
