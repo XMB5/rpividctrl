@@ -15,8 +15,8 @@ class MessageType(IntEnum):
     SET_RESOLUTION_FRAMERATE = 0  # resolution and framerate are set together because changing either requires creating a new CapsFilter
     PAUSE = 1
     RESUME = 2
-    PING = 3  # when one sides receive PING, it replies instanly with PONG (for measuring network round trip time)
-    PONG = 4
+    STATS_REQUEST = 3
+    STATS_RESPONSE = 4
     SET_ANNOTATION_MODE = 5
     SET_DRC_LEVEL = 6
     SET_TARGET_BITRATE = 7
@@ -134,6 +134,8 @@ class MessageReader:
             info['drc_level'] = DRCLevel(struct.unpack('B', content)[0])
         elif message_type == MessageType.SET_TARGET_BITRATE:
             info['target_bitrate'] = struct.unpack('>I', content)[0]
+        elif message_type == MessageType.STATS_RESPONSE:
+            info['stats_tuple'] = struct.unpack('3f', content)
 
         return info
 
@@ -143,8 +145,7 @@ class MessageBuilder:
     # these 4 declared here for pycharm autocomplete
     RESUME = None
     PAUSE = None
-    PING = None
-    PONG = None
+    STATS_REQUEST = None
 
     @staticmethod
     def len_to_bytes(message_len):
@@ -170,16 +171,20 @@ class MessageBuilder:
     def set_target_bitrate(bps):
         return MessageBuilder.SET_TARGET_BITRATE_HEADER + struct.pack('>I', bps)
 
+    @staticmethod
+    def stats_response(stats_tuple):
+        return MessageBuilder.STATS_RESPONSE_HEADER + struct.pack('3f', *stats_tuple)
+
 
 MessageBuilder.MESSAGE_LEN_1 = MessageBuilder.len_to_bytes(1)
 MessageBuilder.SET_RESOLUTION_FRAMERATE_HEADER = MessageBuilder.len_to_bytes(7) + bytes([MessageType.SET_RESOLUTION_FRAMERATE])
 MessageBuilder.SET_ANNOTATION_MODE_HEADER = MessageBuilder.len_to_bytes(3) + bytes([MessageType.SET_ANNOTATION_MODE])
 MessageBuilder.SET_DRC_LEVEL_HEADER = MessageBuilder.len_to_bytes(2) + bytes([MessageType.SET_DRC_LEVEL])
 MessageBuilder.SET_TARGET_BITRATE_HEADER = MessageBuilder.len_to_bytes(5) + bytes([MessageType.SET_TARGET_BITRATE])
+MessageBuilder.STATS_RESPONSE_HEADER = MessageBuilder.len_to_bytes(13) + bytes([MessageType.STATS_RESPONSE])
 MessageBuilder.PAUSE = MessageBuilder.single_byte_command(MessageType.PAUSE)
 MessageBuilder.RESUME = MessageBuilder.single_byte_command(MessageType.RESUME)
-MessageBuilder.PING = MessageBuilder.single_byte_command(MessageType.PING)
-MessageBuilder.PONG = MessageBuilder.single_byte_command(MessageType.PONG)
+MessageBuilder.STATS_REQUEST = MessageBuilder.single_byte_command(MessageType.STATS_REQUEST)
 
 
 class SocketManager:

@@ -4,9 +4,20 @@ from gi.repository import Gst, GLib
 import socket
 import logging
 from rpividctrl_lib.messaging import REMOTE_CONTROL_PORT, RTP_PORT, MessageType, SocketManager, MessageBuilder, AnnotationMode, DRCLevel
+import time
+import collections
 
 logging.basicConfig(level=logging.DEBUG, format='[%(levelname)s %(name)s] %(message)s')
 logger = logging.getLogger('rpividctrl_server')
+
+
+def get_pad(pads_iterator):
+    while True:
+        iterator_result, item = pads_iterator.next()
+        if isinstance(item, Gst.Pad):
+            return item
+        if iterator_result == Gst.IteratorResult.DONE:
+            raise ValueError('could not find pad from iterator')
 
 
 class Main:
@@ -62,6 +73,9 @@ class Main:
         self.udpsink = Gst.ElementFactory.make('udpsink')
         self.udpsink.set_property('port', RTP_PORT)
         self.udpsink.set_property('sync', False)
+        self.stats_buffer = collections.deque(maxlen=50)  # will average last 50 readings
+        buffer_processed_pad = get_pad(self.udpsink.iterate_sink_pads())
+        buffer_processed_pad.add_probe(Gst.PadProbeType.EVENT_DOWNSTREAM, self.buffer_processed_probe)
         self.pipeline.add(self.udpsink)
         self.rtph264pay.link(self.udpsink)
 
@@ -113,8 +127,8 @@ class Main:
             self.pause()
         elif message_type == MessageType.RESUME:
             self.resume()
-        elif message_type == MessageType.PING:
-            self.sock_manager.sendall(MessageBuilder.PONG)
+        elif message_type == MessageType.STATS_REQUEST:
+            self.sock_manager.sendall(MessageBuilder.stats_response(self.get_average_stats()))
         elif message_type == MessageType.SET_ANNOTATION_MODE:
             self.set_annotation_mode(message_info['annotation_mode'])
         elif message_type == MessageType.SET_DRC_LEVEL:
@@ -127,10 +141,52 @@ class Main:
     def set_dest_host(self, host):
         self.udpsink.set_property('host', host)
 
+    def camsrc_probe(self, pad, probe_info):
+        event_structure = Gst.Structure.new_empty('camsrc_time')
+        event_structure.set_value('time', time.monotonic())
+        pad.get_peer().send_event(Gst.Event.new_custom(Gst.EventType.CUSTOM_DOWNSTREAM, event_structure))
+        return Gst.PadProbeReturn.OK
+
+    def buffer_processed_probe(self, pad, probe_info):
+        event = probe_info.get_event()
+        if event.type == Gst.EventType.CUSTOM_DOWNSTREAM:
+            structure = event.get_structure()
+            if structure.has_name('camsrc_time'):
+                camsrc_time = event.get_structure().get_value('time')
+                now = time.monotonic()
+                time_diff = now - camsrc_time
+                self.measure_stats(time_diff)
+        return Gst.PadProbeReturn.OK
+
+    def get_average_stats(self):
+        num_measurements = len(self.stats_buffer)
+        if num_measurements > 0:
+            latency_sum = 0
+            queue0_sum = 0
+            queue1_sum = 0
+            for latency, queue0_level, queue1_level in self.stats_buffer:
+                latency_sum += latency
+                queue0_sum += queue0_level
+                queue1_sum += queue1_level
+            latency_avg = latency_sum / num_measurements
+            queue0_avg = queue0_sum / num_measurements
+            queue1_avg = queue1_sum / num_measurements
+            return latency_avg, queue0_avg, queue1_avg
+        else:
+            return 0, 0, 0
+
+    def measure_stats(self, last_pipeline_latency):
+        queue0_level = self.queue0.get_property('current-level-buffers')
+        queue1_level = self.queue0.get_property('current-level-buffers')
+        self.stats_buffer.append((last_pipeline_latency, queue0_level, queue1_level))
+
     def generate_camsrc(self):
         new_camsrc = Gst.ElementFactory.make('rpicamsrc')
         new_camsrc.set_property('annotation_mode', self.annotation_mode)
         new_camsrc.set_property('drc', int(self.drc_level))
+        pads_iterator = new_camsrc.iterate_src_pads()
+        src_pad = get_pad(pads_iterator)
+        src_pad.add_probe(Gst.PadProbeType.BUFFER, self.camsrc_probe)
         return new_camsrc
 
     def generate_camsrc_capsfilter(self):

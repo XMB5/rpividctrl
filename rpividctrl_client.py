@@ -216,15 +216,15 @@ class RemoteControl:
     STATUS_CONNECTING = 1
     STATUS_CONNECTED = 2
 
-    def __init__(self, on_status_change, on_ping_update):
+    def __init__(self, on_status_change, on_stats_update):
         self.sock_manager = None
         self.on_status_change = on_status_change
-        self.on_ping_update = on_ping_update
+        self.on_stats_update = on_stats_update
         self.status = RemoteControl.STATUS_DISCONNECTED
         self.reason = None
         self.reconnect_timeout_id = None
-        self.ping_timer_id = None
-        self.ping_time = None
+        self.stats_timer_id = None
+        self.stats_request_time = None
 
         self.ip_address = None
         self.width = 0
@@ -257,7 +257,7 @@ class RemoteControl:
         logger.info('sock connected')
         self.set_status(RemoteControl.STATUS_CONNECTED)
         self.sock_manager.cork()
-        self.send_ping()
+        self.send_stats()
         self.send_annotation_mode()
         self.send_drc_level()
         self.send_target_bitrate()
@@ -266,26 +266,26 @@ class RemoteControl:
         # which can cause some delay
         self.send_resolution_framerate()
         self.sock_manager.uncork()
-        self.ping_timer_id = GLib.timeout_add(1000, self.send_ping)
+        self.stats_timer_id = GLib.timeout_add(500, self.send_stats)
 
     def on_sock_read_message(self, message):
         message_type = message['message_type']
-        if message_type == MessageType.PONG:
-            if self.ping_time is None:
-                logger.warning('received ping without ever sending pong')
+        if message_type == MessageType.STATS_RESPONSE:
+            if self.stats_request_time is None:
+                logger.warning('received stats without ever sending request')
             else:
-                pong_time = time.monotonic()
-                rtt = pong_time - self.ping_time
-                self.on_ping_update(rtt)
-                self.ping_time = None
+                stats_res_time = time.monotonic()
+                rtt = stats_res_time - self.stats_request_time
+                self.on_stats_update(rtt, message['stats_tuple'])
+                self.stats_request_time = None
 
     def reconnect(self, disconnect_reason=None, reconnect_delay=1500):
         logger.info(f'disconnect with reason {disconnect_reason}, reconnect in {reconnect_delay} ms')
         self.set_status(RemoteControl.STATUS_DISCONNECTED, disconnect_reason)
-        if self.ping_timer_id is not None:
-            GLib.source_remove(self.ping_timer_id)
-            self.ping_timer_id = None
-            self.ping_time = None
+        if self.stats_timer_id is not None:
+            GLib.source_remove(self.stats_timer_id)
+            self.stats_timer_id = None
+            self.stats_request_time = None
 
         if self.sock_manager:
             self.sock_manager.on_destroy = None
@@ -306,12 +306,12 @@ class RemoteControl:
         self.connect()
         return False
 
-    def send_ping(self):
-        if self.ping_time is None:
-            self.ping_time = time.monotonic()
-            self.send_if_connected(MessageBuilder.PING)
+    def send_stats(self):
+        if self.stats_request_time is None:
+            self.stats_request_time = time.monotonic()
+            self.send_if_connected(MessageBuilder.STATS_REQUEST)
         else:
-            logger.warning('time to send another ping, but have not received last ping\'s response')
+            logger.warning('time to send another stats, but have not received last stats\'s response')
         return GLib.SOURCE_CONTINUE
 
     def send_if_connected(self, bytes_to_write):
@@ -380,7 +380,7 @@ class VideoAppWindow(Gtk.ApplicationWindow):
         target_birtate_str = settings.get('target_bitrate') or '1M'
         chosen_overlay_display_name = settings.get('overlay')
 
-        self.remote_control = RemoteControl(self.remote_control_status_change, self.remote_control_ping_update)
+        self.remote_control = RemoteControl(self.remote_control_status_change, self.remote_control_stats_update)
 
         self.prev_success_pkts = 0
         self.prev_failure_pkts = 0
@@ -429,7 +429,6 @@ class VideoAppWindow(Gtk.ApplicationWindow):
         # framerate
 
         framerate_store = Gtk.ListStore(int, str)
-        framerate_store.append([120, '120fps'])
         framerate_store.append([90, '90fps'])
         framerate_store.append([60, '60fps'])
         framerate_store.append([45, '45fps'])
@@ -533,8 +532,8 @@ class VideoAppWindow(Gtk.ApplicationWindow):
         self.connection_status_label = Gtk.Label()
         remote_bar.add(self.connection_status_label)
 
-        self.ping_label = Gtk.Label()
-        remote_bar.add(self.ping_label)
+        self.stats_label = Gtk.Label()
+        remote_bar.add(self.stats_label)
 
         self.grid.attach(remote_bar, 0, 0, 1, 1)
 
@@ -616,14 +615,14 @@ class VideoAppWindow(Gtk.ApplicationWindow):
             if reason:
                 label_str += ': ' + reason
             self.connection_status_label.set_label(label_str)
-            self.ping_label.set_label('')
+            self.stats_label.set_label('')
         elif status == RemoteControl.STATUS_CONNECTING:
             self.connection_status_label.set_label('connecting')
         elif status == RemoteControl.STATUS_CONNECTED:
             self.connection_status_label.set_label('connected')
 
-    def remote_control_ping_update(self, rtt):
-        # event triggered about every second, when ping / round trip time is measured
+    def remote_control_stats_update(self, rtt, stats_tuple):
+        # event triggered when stats are updated
         rtt_ms = rtt * 1e3
 
         packet_stats = self.video.rtpjitterbuffer.get_property('stats')
@@ -632,7 +631,12 @@ class VideoAppWindow(Gtk.ApplicationWindow):
         new_success_pkts = success_pkts - self.prev_success_pkts
         new_failure_pkts = failure_pkts - self.prev_failure_pkts
 
-        self.ping_label.set_label(f'{rtt_ms:.1f} ms  {new_failure_pkts}|{new_success_pkts}')
+        remote_pipeline_latency_ms = stats_tuple[0] * 1e3
+        remote_pipeline_queues = (stats_tuple[1] + stats_tuple[2]) / 2
+
+        self.stats_label.set_label(f'{rtt_ms:.1f} ms rtt, {remote_pipeline_latency_ms:.1f} ms pipeline, {remote_pipeline_queues:.3f} queue lvl, {new_failure_pkts} pkt fail, {new_success_pkts} pkt success')
+
+        logger.info(f'stats tuple {stats_tuple}')
 
         self.prev_success_pkts = success_pkts
         self.prev_failure_pkts = failure_pkts
