@@ -311,7 +311,7 @@ class RemoteControl:
             self.stats_request_time = time.monotonic()
             self.send_if_connected(MessageBuilder.STATS_REQUEST)
         else:
-            logger.warning('time to send another stats, but have not received last stats\'s response')
+            logger.warning('time to send another stats request, but have not received last stats request response')
         return GLib.SOURCE_CONTINUE
 
     def send_if_connected(self, bytes_to_write):
