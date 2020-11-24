@@ -7,13 +7,19 @@ from rpividctrl_lib.messaging import REMOTE_CONTROL_PORT, RTP_PORT, MessageType,
 import time
 import collections
 from common import get_pad, STATS_BUFFER_LEN
+import os
 
 logging.basicConfig(level=logging.DEBUG, format='[%(levelname)s %(name)s] %(message)s')
 logger = logging.getLogger('rpividctrl_server')
 
+IPV4_UDP_OVERHEAD = 20 + 8  # 20 byte IPv4 header + 8 byte UDP header
+
 
 class Main:
-    def __init__(self, host=''):
+    def __init__(self, settings):
+        host = settings.get('host') or ''  # empty string=listen on all interfaces
+        mtu = int(settings.get('mtu') or 1500)
+
         self.mainloop = GLib.MainLoop()
 
         logger.info('init pipeline')
@@ -44,7 +50,6 @@ class Main:
         self.convert.link(self.queue0)
 
         self.target_bitrate = 1000000
-
         self.h264enc = self.generate_h264enc()
         self.pipeline.add(self.h264enc)
         self.queue0.link(self.h264enc)
@@ -59,6 +64,7 @@ class Main:
         self.h264enc_caps_filter.link(self.queue1)
 
         self.rtph264pay = Gst.ElementFactory.make('rtph264pay')
+        self.rtph264pay.set_property('mtu', mtu - IPV4_UDP_OVERHEAD)  # this property is not the MTU of the link, but rather the maximum udp data size
         self.pipeline.add(self.rtph264pay)
         self.queue1.link(self.rtph264pay)
 
@@ -109,8 +115,6 @@ class Main:
         self.pause()
 
     def handle_message(self, message_info):
-        logger.info(f'message info {message_info}')
-
         message_type = message_info['message_type']
 
         if message_type == MessageType.SET_RESOLUTION_FRAMERATE:
@@ -260,6 +264,9 @@ class Main:
 
 if __name__ == '__main__':
     Gst.init(None)
-    start = Main()
+    start = Main({
+        'host': os.environ.get('RPIVIDCTRL_SERVER_HOST'),
+        'mtu': os.environ.get('RPIVIDCTRL_SERVER_MTU')
+    })
     start.run()
     start.resume()
