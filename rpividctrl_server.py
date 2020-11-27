@@ -34,23 +34,17 @@ class Main:
         self.annotation_mode = AnnotationMode.NONE
         self.drc_level = DRCLevel.OFF
         self.camsrc = None
-        # we will create camsrc element when client connects, so that the camera stays powered off when not used
+        # we will create camsrc + camsrc capsfilter elements when client connects, so that the camera stays powered off when not used
         # (as soon as we create the camsrc element, the camera is powered on)
         # but this way, when we are not using the camera, another program could start using it and then we wouldn't be able to access it
 
-        self.width = 640
-        self.height = 480
-        self.framerate = 60
-        self.camsrc_caps_filter = self.generate_camsrc_capsfilter()
-        self.pipeline.add(self.camsrc_caps_filter)
-
-        self.convert = Gst.ElementFactory.make('videoconvert')
-        self.pipeline.add(self.convert)
-        self.camsrc_caps_filter.link(self.convert)
+        self.width = 0
+        self.height = 0
+        self.framerate = 0
+        self.camsrc_caps_filter = None
 
         self.queue0 = Gst.ElementFactory.make('queue')
         self.pipeline.add(self.queue0)
-        self.convert.link(self.queue0)
 
         self.target_bitrate = 1000000
         self.h264enc = self.generate_h264enc()
@@ -58,7 +52,7 @@ class Main:
         self.queue0.link(self.h264enc)
 
         self.h264enc_caps_filter = Gst.ElementFactory.make('capsfilter')
-        self.h264enc_caps_filter.set_property('caps', Gst.Caps.from_string('video/x-h264,colorimetry=bt709'))
+        self.h264enc_caps_filter.set_property('caps', Gst.Caps.from_string('video/x-h264,colorimetry=bt709,profile=high'))
         self.pipeline.add(self.h264enc_caps_filter)
         self.h264enc.link(self.h264enc_caps_filter)
 
@@ -192,7 +186,7 @@ class Main:
 
     def generate_camsrc_capsfilter(self):
         new_camsrc_capsfilter = Gst.ElementFactory.make('capsfilter')
-        caps_str = f'video/x-raw,width={self.width},height={self.height},framerate={self.framerate}/1'
+        caps_str = f'video/x-raw,width={self.width},height={self.height},framerate={self.framerate}/1,format=I420'
         caps = Gst.Caps.from_string(caps_str)
         new_camsrc_capsfilter.set_property('caps', caps)
         return new_camsrc_capsfilter
@@ -222,10 +216,11 @@ class Main:
 
             self.pipeline.set_state(Gst.State.NULL)
             if self.camsrc:
-                self.camsrc.unlink(self.camsrc_caps_filter)
+                self.camsrc.unlink(self.camsrc_caps_filter)  # assume camsrc_caps_filter exists if camsrc exists
                 self.pipeline.remove(self.camsrc)
-            self.camsrc_caps_filter.unlink(self.queue0)
-            self.pipeline.remove(self.camsrc_caps_filter)
+            if self.camsrc_caps_filter:
+                self.camsrc_caps_filter.unlink(self.queue0)
+                self.pipeline.remove(self.camsrc_caps_filter)
 
             self.camsrc = self.generate_camsrc()
             self.pipeline.add(self.camsrc)
@@ -233,7 +228,7 @@ class Main:
             self.camsrc_caps_filter = self.generate_camsrc_capsfilter()
             self.pipeline.add(self.camsrc_caps_filter)
             self.camsrc.link(self.camsrc_caps_filter)
-            self.camsrc_caps_filter.link(self.convert)
+            self.camsrc_caps_filter.link(self.queue0)
 
         self.pipeline.set_state(Gst.State.PLAYING)
 
