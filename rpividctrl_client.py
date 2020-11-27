@@ -25,13 +25,16 @@ class VideoWidget(Gtk.Overlay):
 
         self.stats_buffer = collections.deque(maxlen=STATS_BUFFER_LEN)
 
-        self.rtpjitterbuffer = None
+        self.pipeline = None
+        self.rtpbin = None
         self.rtph264depay = None
         self.h264_caps_filter = None
         self.h264dec = None
         self.videoconvert = None
         self.imagesink = None
         self.imagesink_widget = None
+
+        self.rtpulpfecdec = None
 
         self.h264dec_factory = h264dec_factory
 
@@ -50,35 +53,27 @@ class VideoWidget(Gtk.Overlay):
         self.pipeline.add(udpsrc)
 
         udpsrc_caps_filter = Gst.ElementFactory.make('capsfilter')
-        udpsrc_caps_filter.set_property('caps', Gst.Caps.from_string('application/x-rtp'))
+        udpsrc_caps_filter.set_property('caps', Gst.Caps.from_string('application/x-rtp,clock-rate=90000'))
         self.pipeline.add(udpsrc_caps_filter)
         udpsrc.link(udpsrc_caps_filter)
 
-        self.rtpjitterbuffer = Gst.ElementFactory.make('rtpjitterbuffer')
-        self.rtpjitterbuffer.set_property('latency', 0)
-        self.pipeline.add(self.rtpjitterbuffer)
-        udpsrc_caps_filter.link(self.rtpjitterbuffer)
+        self.rtpbin = Gst.ElementFactory.make('rtpbin')
+        self.rtpbin.set_property('do-lost', True)
+        self.pipeline.add(self.rtpbin)
+        self.rtpbin.connect('new-storage', self.rtpbin_new_storage)
+        self.rtpbin.connect('request-pt-map', self.rtpbin_request_pt_map)
+        self.rtpbin.connect('request-fec-decoder', self.rtpbin_request_fec_decoder)
+        rtpbin_sink_pad = self.rtpbin.get_request_pad('recv_rtp_sink_0')
+        get_pad(udpsrc_caps_filter.iterate_src_pads()).link(rtpbin_sink_pad)
+        self.rtpbin.connect('pad-added', self.rtpbin_pad_added)
 
         self.rtph264depay = Gst.ElementFactory.make('rtph264depay')
         self.pipeline.add(self.rtph264depay)
-        self.rtpjitterbuffer.link(self.rtph264depay)
 
         self.h264_caps_filter = Gst.ElementFactory.make('capsfilter')
         self.h264_caps_filter.set_property('caps', Gst.Caps.from_string('video/x-h264,colorimetry=bt709'))
         self.pipeline.add(self.h264_caps_filter)
         self.rtph264depay.link(self.h264_caps_filter)
-
-        # testsrc = Gst.ElementFactory.make('videotestsrc')
-        # self.pipeline.add(testsrc)
-        #
-        # caps = Gst.ElementFactory.make('capsfilter')
-        # caps.set_property('caps', Gst.Caps.from_string('video/x-raw,width=320,height=240,framerate=10/1'))
-        # self.pipeline.add(caps)
-        # testsrc.link(caps)
-        #
-        # h264enc = Gst.ElementFactory.make('x264enc')
-        # self.pipeline.add(h264enc)
-        # caps.link(h264enc)
 
         self.h264dec = self.create_h264_decoder()
         self.pipeline.add(self.h264dec)
@@ -111,6 +106,35 @@ class VideoWidget(Gtk.Overlay):
         bus.add_signal_watch()
         bus.connect('message::eos', self.on_eos)
         bus.connect('message::error', self.on_error)
+
+    def rtpbin_new_storage(self, rtpbin, storage, unknown):
+        logger.info(f'rtpbin storage added {rtpbin} {storage} {unknown}')
+        storage.set_property('size-time', 250_000_000)
+
+    def rtpbin_request_pt_map(self, *args):
+        logger.info(f'rtpbin request pt map {args}')
+        pt = args[2]
+        if pt == 100:
+            return Gst.Caps.from_string('application/x-rtp,media=video,clock-rate=90000,is-fec=true')
+        elif pt == 96:
+            return Gst.Caps.from_string('application/x-rtp,media=video,clock-rate=90000,encoding-name=H264')
+
+    def rtpbin_request_fec_decoder(self, rtpbin, sess_id):
+        logger.info(f'rtpbin request fec decoder {rtpbin} {sess_id}')
+        self.rtpulpfecdec = Gst.ElementFactory.make('rtpulpfecdec')
+        internal_storage = rtpbin.emit('get-internal-storage', sess_id)
+        logger.info(f'rtpbin fecdec internal storage {internal_storage}')
+        self.rtpulpfecdec.set_property('storage', internal_storage)
+        self.rtpulpfecdec.set_property('pt', 100)
+        return self.rtpulpfecdec
+
+    def rtpbin_pad_added(self, rtpbin, src_pad):
+        logger.info(f'rtpbin pad added {rtpbin} {src_pad} src pad name {src_pad.get_name()}')
+        rtph264depay_sink = get_pad(self.rtph264depay.iterate_sink_pads())
+        rtph264depay_sink_peer = rtph264depay_sink.get_peer()
+        if rtph264depay_sink_peer is not None:
+            rtph264depay_sink_peer.unlink(rtph264depay_sink)
+        src_pad.link(rtph264depay_sink)
 
     def on_eos(self, bus, message):
         logger.error('gstreamer eos')
@@ -653,6 +677,12 @@ class VideoAppWindow(Gtk.ApplicationWindow):
         elif status == RemoteControl.STATUS_CONNECTED:
             self.connection_status_label.set_label('connected')
 
+
+        try:
+            logger.info(f'rtpulpfecdec stats stor {self.video.rtpulpfecdec.get_property("storage")} rec {self.video.rtpulpfecdec.get_property("recovered")} unrec {self.video.rtpulpfecdec.get_property("recovered")}')
+        except:
+            pass
+
     def remote_control_stats_update(self, rtt, stats_tuple):
         # event triggered when stats are updated
 
@@ -680,7 +710,6 @@ class VideoAppWindow(Gtk.ApplicationWindow):
             local_pipeline_latency_sum += latency
         local_pipeline_latency_ms = local_pipeline_latency_sum / local_stats_buffer_len * 1e3 if local_stats_buffer_len > 0 else 0
         self.local_stats_label.set_label(f'{local_pipeline_latency_ms:.1f} ms pipeline')
-
 
     def on_ip_address_changed(self, entry):
         # when the user types in the ip address textbox
