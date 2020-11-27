@@ -1,9 +1,11 @@
 import gi
+
 gi.require_version('Gst', '1.0')
 from gi.repository import Gst, GLib
 import socket
 import logging
-from rpividctrl_lib.messaging import REMOTE_CONTROL_PORT, RTP_PORT, MessageType, SocketManager, MessageBuilder, AnnotationMode, DRCLevel
+from rpividctrl_lib.messaging import REMOTE_CONTROL_PORT, RTP_PORT, MessageType, SocketManager, MessageBuilder, \
+    AnnotationMode, DRCLevel
 import time
 import collections
 from common import get_pad, STATS_BUFFER_LEN
@@ -31,15 +33,16 @@ class Main:
 
         self.annotation_mode = AnnotationMode.NONE
         self.drc_level = DRCLevel.OFF
-        self.camsrc = self.generate_camsrc()
-        self.pipeline.add(self.camsrc)
+        self.camsrc = None
+        # we will create camsrc element when client connects, so that the camera stays powered off when not used
+        # (as soon as we create the camsrc element, the camera is powered on)
+        # but this way, when we are not using the camera, another program could start using it and then we wouldn't be able to access it
 
         self.width = 640
         self.height = 480
         self.framerate = 60
         self.camsrc_caps_filter = self.generate_camsrc_capsfilter()
         self.pipeline.add(self.camsrc_caps_filter)
-        self.camsrc.link(self.camsrc_caps_filter)
 
         self.convert = Gst.ElementFactory.make('videoconvert')
         self.pipeline.add(self.convert)
@@ -64,7 +67,8 @@ class Main:
         self.h264enc_caps_filter.link(self.queue1)
 
         self.rtph264pay = Gst.ElementFactory.make('rtph264pay')
-        self.rtph264pay.set_property('mtu', mtu - IPV4_UDP_OVERHEAD)  # this property is not the MTU of the link, but rather the maximum udp data size
+        self.rtph264pay.set_property('mtu',
+                                     mtu - IPV4_UDP_OVERHEAD)  # this property is not the MTU of the link, but rather the maximum udp data size
         self.pipeline.add(self.rtph264pay)
         self.queue1.link(self.rtph264pay)
 
@@ -113,6 +117,7 @@ class Main:
         logger.info(f'sock destroyed, reason {reason}')
         self.sock_manager = None
         self.pause()
+        self.destroy_camera_element()
 
     def handle_message(self, message_info):
         message_type = message_info['message_type']
@@ -216,9 +221,10 @@ class Main:
             # "/GstPipeline:pipeline0/GstRpiCamSrc:src: Waiting for a buffer from the camera took too long"
 
             self.pipeline.set_state(Gst.State.NULL)
-            self.camsrc.unlink(self.camsrc_caps_filter)
+            if self.camsrc:
+                self.camsrc.unlink(self.camsrc_caps_filter)
+                self.pipeline.remove(self.camsrc)
             self.camsrc_caps_filter.unlink(self.queue0)
-            self.pipeline.remove(self.camsrc)
             self.pipeline.remove(self.camsrc_caps_filter)
 
             self.camsrc = self.generate_camsrc()
@@ -233,11 +239,13 @@ class Main:
 
     def set_annotation_mode(self, annotation_mode):
         self.annotation_mode = annotation_mode
-        self.camsrc.set_property('annotation_mode', int(self.annotation_mode))
+        if self.camsrc:
+            self.camsrc.set_property('annotation_mode', int(self.annotation_mode))
 
     def set_drc_level(self, drc_level):
         self.drc_level = drc_level
-        self.camsrc.set_property('drc', int(self.drc_level))
+        if self.camsrc:
+            self.camsrc.set_property('drc', int(self.drc_level))
 
     def set_target_bitrate(self, bitrate):
         logger.info(f'set target bitrate {bitrate}')
@@ -260,6 +268,15 @@ class Main:
     def pause(self):
         logger.info('pause')
         self.pipeline.set_state(Gst.State.PAUSED)
+
+    def destroy_camera_element(self):
+        logger.info('destory camera element')
+        self.pipeline.remove(self.camsrc)
+        self.camsrc.set_state(Gst.State.NULL)
+        self.camsrc = None
+        self.width = None
+        self.height = None
+        self.framerate = None
 
 
 if __name__ == '__main__':
