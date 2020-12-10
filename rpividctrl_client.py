@@ -117,7 +117,7 @@ class VideoWidget(Gtk.Overlay):
 
     def on_error(self, bus, message):
         parsed_error = message.parse_error()
-        logger.error(f'gstreamer error: {parsed_error.gerror}\nAdditional debug info:\n{parsed_error.debug}')
+        logger.error('gstreamer error: {parsed_error.gerror}\nAdditional debug info:\n{parsed_error.debug}')
 
     def udpsrc_probe(self, pad, probe_info):
         event_structure = Gst.Structure.new_empty('udpsrc_time')
@@ -172,7 +172,7 @@ class VideoWidget(Gtk.Overlay):
         else:
             self.overlay = overlay_cls()
 
-    def draw(self, drawing_area, ctx: cairo.Context):
+    def draw(self, drawing_area, ctx=cairo.Context):
         # draws the overlay
 
         # gtksink draws the video frame in the center its allocated space,
@@ -269,7 +269,7 @@ class RemoteControl:
         self.on_status_change(status, reason)
 
     def connect(self):
-        logger.info(f'connect to {self.ip_address}')
+        logger.info('connect to {self.ip_address}')
         self.set_status(RemoteControl.STATUS_CONNECTING)
         self.sock_manager = SocketManager()
         self.sock_manager.on_destroy = self.on_sock_destroy
@@ -308,7 +308,7 @@ class RemoteControl:
                 self.stats_request_time = None
 
     def reconnect(self, disconnect_reason=None, reconnect_delay=1500):
-        logger.info(f'disconnect with reason {disconnect_reason}, reconnect in {reconnect_delay} ms')
+        logger.info('disconnect with reason {disconnect_reason}, reconnect in {reconnect_delay} ms')
         self.set_status(RemoteControl.STATUS_DISCONNECTED, disconnect_reason)
         if self.stats_timer_id is not None:
             GLib.source_remove(self.stats_timer_id)
@@ -668,7 +668,7 @@ class VideoAppWindow(Gtk.ApplicationWindow):
         remote_pipeline_latency_ms = stats_tuple[0] * 1e3
         remote_pipeline_queues = (stats_tuple[1] + stats_tuple[2]) / 2
 
-        self.remote_stats_label.set_label(f'{rtt_ms:.1f} ms rtt, {remote_pipeline_latency_ms:.1f} ms pipeline, {remote_pipeline_queues:.3f} queue lvl, {new_failure_pkts} pkt fail, {new_success_pkts} pkt success')
+        self.remote_stats_label.set_label('{rtt_ms:.1f} ms rtt, {remote_pipeline_latency_ms:.1f} ms pipeline, {remote_pipeline_queues:.3f} queue lvl, {new_failure_pkts} pkt fail, {new_success_pkts} pkt success')
 
         self.prev_success_pkts = success_pkts
         self.prev_failure_pkts = failure_pkts
@@ -679,50 +679,50 @@ class VideoAppWindow(Gtk.ApplicationWindow):
         for latency, in self.video.stats_buffer:
             local_pipeline_latency_sum += latency
         local_pipeline_latency_ms = local_pipeline_latency_sum / local_stats_buffer_len * 1e3 if local_stats_buffer_len > 0 else 0
-        self.local_stats_label.set_label(f'{local_pipeline_latency_ms:.1f} ms pipeline')
+        self.local_stats_label.set_label('{local_pipeline_latency_ms:.1f} ms pipeline')
 
 
     def on_ip_address_changed(self, entry):
         # when the user types in the ip address textbox
         ip_address = entry.get_text()
-        logger.info(f'ip address changed to {ip_address}')
+        logger.info('ip address changed to {ip_address}')
         self.remote_control.ip_address_changed(ip_address)
 
     def on_resolution_changed(self, combobox):
         width, height, display_str = combobox.get_model()[combobox.get_active_iter()]
-        logger.info(f'resolution changed width {width} height {height}')
+        logger.info('resolution changed width {width} height {height}')
         self.remote_control.resolution_changed(width, height)
 
     def on_framerate_changed(self, combobox):
         framerate, display_str = combobox.get_model()[combobox.get_active_iter()]
-        logger.info(f'framerate changed to {framerate}')
+        logger.info('framerate changed to {framerate}')
         self.remote_control.framerate_changed(framerate)
 
     def on_annotation_mode_changed(self, combobox):
         display_str, flags_int = combobox.get_model()[combobox.get_active_iter()]
         annotation_mode = AnnotationMode(flags_int)
-        logger.info(f'annotation mode changed to {annotation_mode}')
+        logger.info('annotation mode changed to {annotation_mode}')
         self.remote_control.annotation_mode_changed(annotation_mode)
         
     def on_drc_level_changed(self, combobox):
         display_str, flags_int = combobox.get_model()[combobox.get_active_iter()]
         drc_level = DRCLevel(flags_int)
-        logger.info(f'drc level changed to {drc_level}')
+        logger.info('drc level changed to {drc_level}')
         self.remote_control.drc_level_changed(drc_level)
 
     def on_target_bitrate_changed(self, combobox):
         display_str, bps = combobox.get_model()[combobox.get_active_iter()]
-        logger.info(f'target bitrate changed to {display_str}')
+        logger.info('target bitrate changed to {display_str}')
         self.remote_control.target_bitrate_changed(bps)
 
     def on_h264_decoder_changed(self, combobox):
         h264_decoder_name, element_factory = combobox.get_model()[combobox.get_active_iter()]
-        logger.info(f'h264 decoder changed to {h264_decoder_name}')
+        logger.info('h264 decoder changed to {h264_decoder_name}')
         self.video.change_h264_decoder(element_factory)
 
     def on_overlay_changed(self, combobox):
         overlay_display_name, overlay_cls = combobox.get_model()[combobox.get_active_iter()]
-        logger.info(f'overlay changed to {overlay_display_name}')
+        logger.info('overlay changed to {overlay_display_name}')
         self.video.set_overlay_class(overlay_cls)
 
     def on_play_clicked(self, button):
@@ -743,7 +743,7 @@ if __name__ == '__main__':
         logger.info('using default settings')
         settings = {}
     else:
-        logger.info(f'read settings from {args.config}')
+        logger.info('read settings from {args.config}')
         # see possible settings in VideoAppWindow.__init__()
         with open(args.config) as config_file_handle:
             settings = json.load(config_file_handle)
