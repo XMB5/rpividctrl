@@ -30,6 +30,7 @@ class VideoWidget(Gtk.Overlay):
         self.h264_caps_filter = None
         self.h264dec = None
         self.videoconvert = None
+        # self.glupload = None
         self.imagesink = None
         self.imagesink_widget = None
 
@@ -64,7 +65,7 @@ class VideoWidget(Gtk.Overlay):
         self.rtpjitterbuffer.link(self.rtph264depay)
 
         self.h264_caps_filter = Gst.ElementFactory.make('capsfilter')
-        self.h264_caps_filter.set_property('caps', Gst.Caps.from_string('video/x-h264,colorimetry=bt709'))
+        self.h264_caps_filter.set_property('caps', Gst.Caps.from_string('video/x-h264'))
         self.pipeline.add(self.h264_caps_filter)
         self.rtph264depay.link(self.h264_caps_filter)
 
@@ -87,6 +88,20 @@ class VideoWidget(Gtk.Overlay):
         self.videoconvert = Gst.ElementFactory.make('videoconvert')
         self.pipeline.add(self.videoconvert)
         self.h264dec.link(self.videoconvert)
+
+        # gtkglsink would be ideal, because scaling could happen on the GPU instead of CPU
+        # but this setup causes a variety of fatal X errors
+        # need to investigate...
+        # self.glupload = Gst.ElementFactory.make('glupload')
+        # self.pipeline.add(self.glupload)
+        # self.videoconvert.link(self.glupload)
+        #
+        # self.imagesink = Gst.ElementFactory.make('gtkglsink')
+        # self.imagesink.set_property('sync', False)
+        # buffer_processed_pad = get_pad(self.imagesink.iterate_sink_pads())
+        # buffer_processed_pad.add_probe(Gst.PadProbeType.EVENT_DOWNSTREAM, self.buffer_processed_probe)
+        # self.pipeline.add(self.imagesink)
+        # self.glupload.link(self.imagesink)
 
         self.imagesink = Gst.ElementFactory.make('gtksink')
         self.imagesink.set_property('sync', False)
@@ -286,13 +301,11 @@ class RemoteControl:
         self.set_status(RemoteControl.STATUS_CONNECTED)
         self.sock_manager.cork()
         self.send_stats()
-        self.send_annotation_mode()
-        self.send_drc_level()
+        # self.send_annotation_mode()
+        # self.send_drc_level()
         self.send_target_bitrate()
-        # send resolution/framerate last, because this command resumes the stream
-        # this way, we don't need to change any options while the stream is playing,
-        # which can cause some delay
         self.send_resolution_framerate()
+        self.resume()
         self.sock_manager.uncork()
         self.stats_timer_id = GLib.timeout_add(500, self.send_stats)
 
@@ -476,59 +489,59 @@ class VideoAppWindow(Gtk.ApplicationWindow):
 
         # annotation-mode
 
-        annotation_mode_label = Gtk.Label()
-        annotation_mode_label.set_text('annotation mode:')
-        remote_bar.add(annotation_mode_label)
-
-        annotation_store = Gtk.ListStore(str, int)
-        annotation_store.append(['none', AnnotationMode.NONE])
-        annotation_store.append(['text', AnnotationMode.TEXT | AnnotationMode.BLACK_BACKGROUND])
-        annotation_store.append(['date', AnnotationMode.DATE | AnnotationMode.BLACK_BACKGROUND])
-        annotation_store.append(['time', AnnotationMode.TIME | AnnotationMode.BLACK_BACKGROUND])
-        annotation_store.append(['shutter', AnnotationMode.SHUTTER_SETTINGS | AnnotationMode.BLACK_BACKGROUND])
-        annotation_store.append(['caf', AnnotationMode.CAF_SETTINGS | AnnotationMode.BLACK_BACKGROUND])
-        annotation_store.append(['gain', AnnotationMode.GAIN_SETTINGS | AnnotationMode.BLACK_BACKGROUND])
-        annotation_store.append(['lens', AnnotationMode.LENS_SETTINGS | AnnotationMode.BLACK_BACKGROUND])
-        annotation_store.append(['motion', AnnotationMode.MOTIONS_SETTINGS | AnnotationMode.BLACK_BACKGROUND])
-        annotation_store.append(['frame', AnnotationMode.FRAME_NUMBER | AnnotationMode.BLACK_BACKGROUND])
-        annotation_combobox = Gtk.ComboBox.new_with_model(annotation_store)
-        for i, annotation_info in enumerate(annotation_store):
-            display_str, flags_int = annotation_info
-            if display_str == annotation_mode_str:
-                annotation_combobox.set_active(i)
-                self.remote_control.annotation_mode_changed(AnnotationMode(flags_int))
-                set_annotation_active = True
-                break
-        annotation_combobox.connect('changed', self.on_annotation_mode_changed)
-        annotation_renderer = Gtk.CellRendererText()
-        annotation_combobox.pack_start(annotation_renderer, True)
-        annotation_combobox.add_attribute(annotation_renderer, 'text', 0)
-        remote_bar.add(annotation_combobox)
+        # annotation_mode_label = Gtk.Label()
+        # annotation_mode_label.set_text('annotation mode:')
+        # remote_bar.add(annotation_mode_label)
+        #
+        # annotation_store = Gtk.ListStore(str, int)
+        # annotation_store.append(['none', AnnotationMode.NONE])
+        # annotation_store.append(['text', AnnotationMode.TEXT | AnnotationMode.BLACK_BACKGROUND])
+        # annotation_store.append(['date', AnnotationMode.DATE | AnnotationMode.BLACK_BACKGROUND])
+        # annotation_store.append(['time', AnnotationMode.TIME | AnnotationMode.BLACK_BACKGROUND])
+        # annotation_store.append(['shutter', AnnotationMode.SHUTTER_SETTINGS | AnnotationMode.BLACK_BACKGROUND])
+        # annotation_store.append(['caf', AnnotationMode.CAF_SETTINGS | AnnotationMode.BLACK_BACKGROUND])
+        # annotation_store.append(['gain', AnnotationMode.GAIN_SETTINGS | AnnotationMode.BLACK_BACKGROUND])
+        # annotation_store.append(['lens', AnnotationMode.LENS_SETTINGS | AnnotationMode.BLACK_BACKGROUND])
+        # annotation_store.append(['motion', AnnotationMode.MOTIONS_SETTINGS | AnnotationMode.BLACK_BACKGROUND])
+        # annotation_store.append(['frame', AnnotationMode.FRAME_NUMBER | AnnotationMode.BLACK_BACKGROUND])
+        # annotation_combobox = Gtk.ComboBox.new_with_model(annotation_store)
+        # for i, annotation_info in enumerate(annotation_store):
+        #     display_str, flags_int = annotation_info
+        #     if display_str == annotation_mode_str:
+        #         annotation_combobox.set_active(i)
+        #         self.remote_control.annotation_mode_changed(AnnotationMode(flags_int))
+        #         set_annotation_active = True
+        #         break
+        # annotation_combobox.connect('changed', self.on_annotation_mode_changed)
+        # annotation_renderer = Gtk.CellRendererText()
+        # annotation_combobox.pack_start(annotation_renderer, True)
+        # annotation_combobox.add_attribute(annotation_renderer, 'text', 0)
+        # remote_bar.add(annotation_combobox)
 
         # drc
 
-        drc_label = Gtk.Label()
-        drc_label.set_text('drc:')
-        remote_bar.add(drc_label)
-
-        drc_store = Gtk.ListStore(str, int)
-        drc_store.append(['off', DRCLevel.OFF])
-        drc_store.append(['low', DRCLevel.LOW])
-        drc_store.append(['medium', DRCLevel.MEDIUM])
-        drc_store.append(['high', DRCLevel.HIGH])
-        drc_combobox = Gtk.ComboBox.new_with_model(drc_store)
-        for i, drc_info in enumerate(drc_store):
-            display_str, flags_int = drc_info
-            if display_str == drc_level_str:
-                drc_combobox.set_active(i)
-                self.remote_control.drc_level_changed(DRCLevel(flags_int))
-                set_active_drc = True
-                break
-        drc_combobox.connect('changed', self.on_drc_level_changed)
-        drc_renderer = Gtk.CellRendererText()
-        drc_combobox.pack_start(drc_renderer, True)
-        drc_combobox.add_attribute(drc_renderer, 'text', 0)
-        remote_bar.add(drc_combobox)
+        # drc_label = Gtk.Label()
+        # drc_label.set_text('drc:')
+        # remote_bar.add(drc_label)
+        #
+        # drc_store = Gtk.ListStore(str, int)
+        # drc_store.append(['off', DRCLevel.OFF])
+        # drc_store.append(['low', DRCLevel.LOW])
+        # drc_store.append(['medium', DRCLevel.MEDIUM])
+        # drc_store.append(['high', DRCLevel.HIGH])
+        # drc_combobox = Gtk.ComboBox.new_with_model(drc_store)
+        # for i, drc_info in enumerate(drc_store):
+        #     display_str, flags_int = drc_info
+        #     if display_str == drc_level_str:
+        #         drc_combobox.set_active(i)
+        #         self.remote_control.drc_level_changed(DRCLevel(flags_int))
+        #         set_active_drc = True
+        #         break
+        # drc_combobox.connect('changed', self.on_drc_level_changed)
+        # drc_renderer = Gtk.CellRendererText()
+        # drc_combobox.pack_start(drc_renderer, True)
+        # drc_combobox.add_attribute(drc_renderer, 'text', 0)
+        # remote_bar.add(drc_combobox)
 
         # target-bitrate
 

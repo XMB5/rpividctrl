@@ -10,4 +10,11 @@ def get_pad(pads_iterator):
             raise ValueError('could not find pad from iterator')
 
 
+def dict_to_struct(fields, name='fields'):
+    struct = Gst.Structure.new_empty(name)
+    for key, val in fields.items():
+        struct.set_value(key, val)
+    return struct
+
+
 STATS_BUFFER_LEN = 50  # average last n samples

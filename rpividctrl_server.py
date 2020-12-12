@@ -4,11 +4,10 @@ gi.require_version('Gst', '1.0')
 from gi.repository import Gst, GLib
 import socket
 import logging
-from rpividctrl_lib.messaging import REMOTE_CONTROL_PORT, RTP_PORT, MessageType, SocketManager, MessageBuilder, \
-    AnnotationMode, DRCLevel
+from rpividctrl_lib.messaging import REMOTE_CONTROL_PORT, RTP_PORT, MessageType, SocketManager, MessageBuilder
 import time
 import collections
-from common import get_pad, STATS_BUFFER_LEN
+from common import get_pad, dict_to_struct, STATS_BUFFER_LEN
 import os
 
 logging.basicConfig(level=logging.DEBUG, format='[%(levelname)s %(name)s] %(message)s')
@@ -31,40 +30,80 @@ class Main:
         self.pipeline.get_bus().connect('message::eos', self.on_eos)  # eos==end of stream -- should never happen
         self.pipeline.get_bus().connect('message::error', self.on_error)
 
-        self.annotation_mode = AnnotationMode.NONE
-        self.drc_level = DRCLevel.OFF
         self.camsrc = None
-        # we will create camsrc + camsrc capsfilter elements when client connects, so that the camera stays powered off when not used
+        # we will create camsrc when client connects, so that the camera stays powered off when not used
         # (as soon as we create the camsrc element, the camera is powered on)
         # but this way, when we are not using the camera, another program could start using it and then we wouldn't be able to access it
 
-        self.width = 0
-        self.height = 0
-        self.framerate = 0
-        self.camsrc_caps_filter = None
+        self.image_processing = False
 
-        self.queue0 = Gst.ElementFactory.make('queue')
-        self.pipeline.add(self.queue0)
+        self.width = 640
+        self.height = 480
+        self.framerate = 60
+        self.camsrc_caps_filter = Gst.ElementFactory.make('capsfilter')
+        self.camsrc_caps_filter.set_property('caps', self.generate_camsrc_caps())
+        self.pipeline.add(self.camsrc_caps_filter)
+
+        # if image_processing is on
+        #                                                                  /-> queue -> v4l2convert -> queue -> h264enc -> h264enc_caps_filter -> ...
+        # camsrc -> camsrc_caps_filter video/x-raw,format=BGR/other -> tee |
+        #                                                                  \-> queue -> appsink
+        #
+        # if image_processing is off
+        # camsrc -> camsrc_caps_filter video/x-h264 -> h264parse -> ...
+
+        self.rtp_queue = Gst.ElementFactory.make('queue', 'rtp_queue')
+        self.pipeline.add(self.rtp_queue)
 
         self.target_bitrate = 1000000
-        self.h264enc = self.generate_h264enc()
-        self.pipeline.add(self.h264enc)
-        self.queue0.link(self.h264enc)
 
-        self.h264enc_caps_filter = Gst.ElementFactory.make('capsfilter')
-        self.h264enc_caps_filter.set_property('caps', Gst.Caps.from_string('video/x-h264,colorimetry=bt709,profile=high'))
-        self.pipeline.add(self.h264enc_caps_filter)
-        self.h264enc.link(self.h264enc_caps_filter)
+        if self.image_processing:
+            self.tee = Gst.ElementFactory.make('tee')
+            self.pipeline.add(self.tee)
+            self.camsrc_caps_filter.link(self.tee)
 
-        self.queue1 = Gst.ElementFactory.make('queue')
-        self.pipeline.add(self.queue1)
-        self.h264enc_caps_filter.link(self.queue1)
+            # appsink branch of tee
+
+            self.appsink_queue = Gst.ElementFactory.make('queue', 'appsink_queue')
+            self.pipeline.add(self.appsink_queue)
+            self.tee.link(self.appsink_queue)
+
+            self.appsink = Gst.ElementFactory.make('appsink')
+            self.appsink.set_property('sync', False)
+            self.appsink.set_property('emit-signals', True)
+            self.appsink.connect('new-sample', self.appsink_new_sample, self.appsink)
+            self.pipeline.add(self.appsink)
+            self.appsink_queue.link(self.appsink)
+
+            # h264 branch of tee
+
+            self.h264enc_queue = Gst.ElementFactory.make('queue', 'h264enc_queue')
+            self.pipeline.add(self.h264enc_queue)
+            self.tee.link(self.h264enc_queue)
+
+            self.h264enc = Gst.ElementFactory.make('v4l2h264enc')
+            self.h264enc.set_property('extra_controls', dict_to_struct(self.generate_h264enc_controls()))
+            self.pipeline.add(self.h264enc)
+            self.h264enc_queue.link(self.h264enc)
+
+            self.h264enc_caps_filter = Gst.ElementFactory.make('capsfilter', 'h264enc_caps_filter')
+            self.h264enc_caps_filter.set_property('caps', Gst.Caps.from_string('video/x-h264,profile=high'))
+            self.pipeline.add(self.h264enc_caps_filter)
+            self.h264enc.link(self.h264enc_caps_filter)
+            self.h264enc_caps_filter.link(self.rtp_queue)
+        else:
+            self.h264parse = Gst.ElementFactory.make('h264parse')
+            self.pipeline.add(self.h264parse)
+            self.camsrc_caps_filter.link(self.h264parse)
+            self.h264parse.link(self.rtp_queue)
+
+        # ... -> queue -> rtph264pay -> udpsink
 
         self.rtph264pay = Gst.ElementFactory.make('rtph264pay')
         self.rtph264pay.set_property('mtu',
                                      mtu - IPV4_UDP_OVERHEAD)  # this property is not the MTU of the link, but rather the maximum udp data size
         self.pipeline.add(self.rtph264pay)
-        self.queue1.link(self.rtph264pay)
+        self.rtp_queue.link(self.rtph264pay)
 
         self.udpsink = Gst.ElementFactory.make('udpsink')
         self.udpsink.set_property('port', RTP_PORT)
@@ -91,6 +130,11 @@ class Main:
         parsed_error = message.parse_error()
         logger.error(f'gstreamer error: {parsed_error.gerror}\nAdditional debug info:\n{parsed_error.debug}')
 
+    def appsink_new_sample(self, *args):
+        sample = self.appsink.emit('pull-sample')
+        logger.info(f'appsink sample {sample} {sample.get_caps().to_string()}')
+        return Gst.FlowReturn.OK
+
     def new_conn_listener(self, server_sock, *args):
         # new connection
         conn, addr = server_sock.accept()
@@ -101,10 +145,13 @@ class Main:
             self.sock_manager.destroy()
             self.sock_manager = None
         self.set_dest_host(addr[0])
-        # do not need to resume the pipeline here, because the client will send a SET_RESOLUTION_FRAMERATE command which will resume it
         self.sock_manager = SocketManager(conn)
         self.sock_manager.on_destroy = self.on_sock_destroy
         self.sock_manager.on_read_message = self.handle_message
+
+        self.pipeline.set_state(Gst.State.NULL)
+        self.create_camera_element()
+
         return True
 
     def on_sock_destroy(self, reason):
@@ -124,16 +171,13 @@ class Main:
             self.resume()
         elif message_type == MessageType.STATS_REQUEST:
             self.sock_manager.sendall(MessageBuilder.stats_response(self.get_average_stats()))
-        elif message_type == MessageType.SET_ANNOTATION_MODE:
-            self.set_annotation_mode(message_info['annotation_mode'])
-        elif message_type == MessageType.SET_DRC_LEVEL:
-            self.set_drc_level(message_info['drc_level'])
         elif message_type == MessageType.SET_TARGET_BITRATE:
             self.set_target_bitrate(message_info['target_bitrate'])
         else:
             logger.warning(f'do not know how to handle message type {message_type}')
 
     def set_dest_host(self, host):
+        logger.info(f'set dest host {host}')
         self.udpsink.set_property('host', host)
 
     def camsrc_probe(self, pad, probe_info):
@@ -171,81 +215,49 @@ class Main:
             return 0, 0, 0
 
     def measure_stats(self, last_pipeline_latency):
-        queue0_level = self.queue0.get_property('current-level-buffers')
-        queue1_level = self.queue0.get_property('current-level-buffers')
+        # TODO: fix queue stats
+        queue0_level = 0 #self.queue0.get_property('current-level-buffers')
+        queue1_level = 0 #self.queue1.get_property('current-level-buffers')
         self.stats_buffer.append((last_pipeline_latency, queue0_level, queue1_level))
 
-    def generate_camsrc(self):
-        new_camsrc = Gst.ElementFactory.make('rpicamsrc')
-        new_camsrc.set_property('annotation_mode', self.annotation_mode)
-        new_camsrc.set_property('drc', int(self.drc_level))
-        pads_iterator = new_camsrc.iterate_src_pads()
-        src_pad = get_pad(pads_iterator)
-        src_pad.add_probe(Gst.PadProbeType.BUFFER, self.camsrc_probe)
-        return new_camsrc
+    def generate_camsrc_controls(self):
+        # `v4l2-ctl -L` to list controls
+        return {
+            'power_line_frequency': 0  # 0==disabled, 1==50hz, 2==60hz, 3==auto, default 50hz
+        }
 
-    def generate_camsrc_capsfilter(self):
-        new_camsrc_capsfilter = Gst.ElementFactory.make('capsfilter')
-        caps_str = f'video/x-raw,width={self.width},height={self.height},framerate={self.framerate}/1,format=I420'
-        caps = Gst.Caps.from_string(caps_str)
-        new_camsrc_capsfilter.set_property('caps', caps)
-        return new_camsrc_capsfilter
+    def generate_h264enc_controls(self):
+        # `v4l2-ctl -L` to list controls
+        return {
+            'video_bitrate': self.target_bitrate
+        }
 
-    def generate_h264enc(self):
-        h264enc = Gst.ElementFactory.make('omxh264enc')
-        h264enc.set_property('b-frames', 0)
-        h264enc.set_property('control-rate', 'variable')  # fails with 'constant'
-        h264enc.set_property('target-bitrate', self.target_bitrate)
-        return h264enc
+    def generate_camsrc_caps(self):
+        if self.image_processing:
+            return Gst.Caps.from_string(f'video/x-raw,width={self.width},height={self.height},framerate={self.framerate}/1,format=BGR')
+        else:
+            return Gst.Caps.from_string(f'video/x-h264,width={self.width},height={self.height},framerate={self.framerate}/1')
 
     def set_resolution_framerate(self, new_width, new_height, new_framerate):
-        """Changes the resolution and framerate, and resumes the pipeline"""
+        """Changes the resolution and framerate"""
 
-        if new_width == self.width and new_height == self.height and new_framerate == self.framerate:
-            logger.info(f'not changing width, height, framerate, because it would be the same')
-        else:
-            self.width = new_width
-            self.height = new_height
-            self.framerate = new_framerate
+        logger.info(f'set resolution {new_width}x{new_height} framerate {new_framerate}')
 
-            logger.info(f'set width {self.width}, height {self.height}, framerate {self.framerate}')
+        self.width = new_width
+        self.height = new_height
+        self.framerate = new_framerate
 
-            # we need to remove the rpicamsrc element and the following CapsFilter, and then insert new ones into the pipeline
-            # I tried keeping the same elements and changing the properties, but it fails with an error like
-            # "/GstPipeline:pipeline0/GstRpiCamSrc:src: Waiting for a buffer from the camera took too long"
-
-            self.pipeline.set_state(Gst.State.NULL)
-            if self.camsrc:
-                self.camsrc.unlink(self.camsrc_caps_filter)  # assume camsrc_caps_filter exists if camsrc exists
-                self.pipeline.remove(self.camsrc)
-            if self.camsrc_caps_filter:
-                self.camsrc_caps_filter.unlink(self.queue0)
-                self.pipeline.remove(self.camsrc_caps_filter)
-
-            self.camsrc = self.generate_camsrc()
-            self.pipeline.add(self.camsrc)
-
-            self.camsrc_caps_filter = self.generate_camsrc_capsfilter()
-            self.pipeline.add(self.camsrc_caps_filter)
-            self.camsrc.link(self.camsrc_caps_filter)
-            self.camsrc_caps_filter.link(self.queue0)
-
+        self.pipeline.set_state(Gst.State.PAUSED)
+        self.camsrc_caps_filter.set_property('caps', self.generate_camsrc_caps())
         self.pipeline.set_state(Gst.State.PLAYING)
-
-    def set_annotation_mode(self, annotation_mode):
-        self.annotation_mode = annotation_mode
-        if self.camsrc:
-            self.camsrc.set_property('annotation_mode', int(self.annotation_mode))
-
-    def set_drc_level(self, drc_level):
-        self.drc_level = drc_level
-        if self.camsrc:
-            self.camsrc.set_property('drc', int(self.drc_level))
 
     def set_target_bitrate(self, bitrate):
         logger.info(f'set target bitrate {bitrate}')
         self.target_bitrate = bitrate
-        self.h264enc.set_property('target-bitrate', bitrate)
+        if self.image_processing:
+            self.h264enc.set_property('extra_controls', dict_to_struct(self.generate_h264enc_controls()))
+        else:
+            self.camsrc.set_property('extra_controls', dict_to_struct({**self.generate_h264enc_controls(), **self.generate_camsrc_controls()}))
 
     def run(self):
         logger.info('run')
@@ -264,6 +276,19 @@ class Main:
         logger.info('pause')
         self.pipeline.set_state(Gst.State.PAUSED)
 
+    def create_camera_element(self):
+        logger.info('create camera element')
+        self.camsrc = Gst.ElementFactory.make('v4l2src')
+        #self.camsrc.set_property('io-mode', 'userptr')  # fastest, found by trial and error
+        if self.image_processing:
+            self.camsrc.set_property('extra_controls', dict_to_struct(self.generate_camsrc_controls()))
+        else:
+            self.camsrc.set_property('extra_controls', dict_to_struct({**self.generate_camsrc_controls(), **self.generate_h264enc_controls()}))
+        src_pad = get_pad(self.camsrc.iterate_src_pads())
+        src_pad.add_probe(Gst.PadProbeType.BUFFER, self.camsrc_probe)
+        self.pipeline.add(self.camsrc)
+        self.camsrc.link(self.camsrc_caps_filter)
+
     def destroy_camera_element(self):
         logger.info('destory camera element')
         self.pipeline.remove(self.camsrc)
@@ -281,4 +306,3 @@ if __name__ == '__main__':
         'mtu': os.environ.get('RPIVIDCTRL_SERVER_MTU')
     })
     start.run()
-    start.resume()
