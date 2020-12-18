@@ -3,5 +3,5 @@
   "width": 640,
   "height": 480,
   "framerate": 90,
-  "h264_decoder": "vaapih264dec"
+  "h264_decoder": "vah264dec"
 }

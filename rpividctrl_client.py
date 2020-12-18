@@ -20,7 +20,7 @@ logger = logging.getLogger('rpividctrl_client')
 class VideoWidget(Gtk.Overlay):
     """The GUI element in the middle of the window with the video stream and any overlays"""
 
-    def __init__(self, h264dec_factory=None, **kwargs):
+    def __init__(self, vid_width, vid_height, h264dec_factory=None, **kwargs):
         super().__init__(**kwargs)
 
         self.stats_buffer = collections.deque(maxlen=STATS_BUFFER_LEN)
@@ -29,11 +29,14 @@ class VideoWidget(Gtk.Overlay):
         self.rtph264depay = None
         self.h264_caps_filter = None
         self.h264dec = None
-        self.videoconvert = None
-        # self.glupload = None
+        self.post_h264dec = None
+        self.glupload = None
+        self.glcolorconvert = None
         self.imagesink = None
         self.imagesink_widget = None
 
+        self.vid_width = vid_width
+        self.vid_height = vid_height
         self.h264dec_factory = h264dec_factory
 
         self.overlay = None
@@ -64,54 +67,30 @@ class VideoWidget(Gtk.Overlay):
         self.pipeline.add(self.rtph264depay)
         self.rtpjitterbuffer.link(self.rtph264depay)
 
-        self.h264_caps_filter = Gst.ElementFactory.make('capsfilter')
-        self.h264_caps_filter.set_property('caps', Gst.Caps.from_string('video/x-h264'))
-        self.pipeline.add(self.h264_caps_filter)
-        self.rtph264depay.link(self.h264_caps_filter)
+        self.glupload = Gst.ElementFactory.make('glupload')
+        self.pipeline.add(self.glupload)
 
-        # testsrc = Gst.ElementFactory.make('videotestsrc')
-        # self.pipeline.add(testsrc)
-        #
-        # caps = Gst.ElementFactory.make('capsfilter')
-        # caps.set_property('caps', Gst.Caps.from_string('video/x-raw,width=320,height=240,framerate=10/1'))
-        # self.pipeline.add(caps)
-        # testsrc.link(caps)
-        #
-        # h264enc = Gst.ElementFactory.make('x264enc')
-        # self.pipeline.add(h264enc)
-        # caps.link(h264enc)
+        self.create_decoder_elements()
 
-        self.h264dec = self.create_h264_decoder()
-        self.pipeline.add(self.h264dec)
-        self.h264_caps_filter.link(self.h264dec)
+        self.glcolorconvert = Gst.ElementFactory.make('glcolorconvert')
+        self.pipeline.add(self.glcolorconvert)
+        self.glupload.link(self.glcolorconvert)
 
-        self.videoconvert = Gst.ElementFactory.make('videoconvert')
-        self.pipeline.add(self.videoconvert)
-        self.h264dec.link(self.videoconvert)
-
-        # gtkglsink would be ideal, because scaling could happen on the GPU instead of CPU
-        # but this setup causes a variety of fatal X errors
-        # need to investigate...
-        # self.glupload = Gst.ElementFactory.make('glupload')
-        # self.pipeline.add(self.glupload)
-        # self.videoconvert.link(self.glupload)
-        #
-        # self.imagesink = Gst.ElementFactory.make('gtkglsink')
-        # self.imagesink.set_property('sync', False)
-        # buffer_processed_pad = get_pad(self.imagesink.iterate_sink_pads())
-        # buffer_processed_pad.add_probe(Gst.PadProbeType.EVENT_DOWNSTREAM, self.buffer_processed_probe)
-        # self.pipeline.add(self.imagesink)
-        # self.glupload.link(self.imagesink)
-
-        self.imagesink = Gst.ElementFactory.make('gtksink')
+        self.imagesink = Gst.ElementFactory.make('gtkglsink')
         self.imagesink.set_property('sync', False)
         buffer_processed_pad = get_pad(self.imagesink.iterate_sink_pads())
         buffer_processed_pad.add_probe(Gst.PadProbeType.EVENT_DOWNSTREAM, self.buffer_processed_probe)
         self.pipeline.add(self.imagesink)
-        self.videoconvert.link(self.imagesink)
+        self.glcolorconvert.link(self.imagesink)
+
+        # self.imagesink = Gst.ElementFactory.make('gtksink')
+        # self.imagesink.set_property('sync', False)
+        # buffer_processed_pad = get_pad(self.imagesink.iterate_sink_pads())
+        # buffer_processed_pad.add_probe(Gst.PadProbeType.EVENT_DOWNSTREAM, self.buffer_processed_probe)
+        # self.pipeline.add(self.imagesink)
+        # self.videoconvert.link(self.imagesink)
 
         self.imagesink_widget = self.imagesink.get_property('widget')
-        # self.pack_start(self.imagesink_widget, True, True, 0)
         self.add(self.imagesink_widget)
         self.imagesink_widget.show()
 
@@ -154,6 +133,11 @@ class VideoWidget(Gtk.Overlay):
     def measure_stats(self, last_pipeline_latency):
         self.stats_buffer.append((last_pipeline_latency, ))
 
+    def create_h264_caps_filter(self):
+        capsfilter = Gst.ElementFactory.make('capsfilter')
+        capsfilter.set_property('caps', Gst.Caps.from_string(f'video/x-h264,width={self.vid_width},height={self.vid_height}'))
+        return capsfilter
+
     def create_h264_decoder(self):
         decoder = self.h264dec_factory.create()
         if decoder.get_factory().get_name() == 'vaapih264dec':
@@ -165,21 +149,63 @@ class VideoWidget(Gtk.Overlay):
                 logger.warning('vaapih264dec property low-latency does not exist, using an old version of libgstvaapi or version compiled without low-latency feature')
         return decoder
 
+    def change_vid_dimensions(self, width, height):
+        self.vid_width = width
+        self.vid_height = height
+
+        self.recreate_decoder_elements()
+
     def change_h264_decoder(self, element_factory):
         self.h264dec_factory = element_factory
 
+        self.recreate_decoder_elements()
+
+    def recreate_decoder_elements(self):
         self.pipeline.set_state(Gst.State.NULL)
 
+        self.rtph264depay.unlink(self.h264_caps_filter)
         self.h264_caps_filter.unlink(self.h264dec)
-        self.h264dec.unlink(self.videoconvert)
+        if self.post_h264dec:
+            self.h264dec.unlink(self.post_h264dec)
+            self.post_h264dec.unlink(self.glupload)
+            self.pipeline.remove(self.post_h264dec)
+        else:
+            self.h264dec.unlink(self.glupload)
+        self.pipeline.remove(self.h264_caps_filter)
         self.pipeline.remove(self.h264dec)
+
+        self.create_decoder_elements()
+
+        self.pipeline.set_state(Gst.State.PLAYING)
+
+    def create_decoder_elements(self):
+        self.h264_caps_filter = self.create_h264_caps_filter()
+        self.pipeline.add(self.h264_caps_filter)
+        self.rtph264depay.link(self.h264_caps_filter)
 
         self.h264dec = self.create_h264_decoder()
         self.pipeline.add(self.h264dec)
         self.h264_caps_filter.link(self.h264dec)
-        self.h264dec.link(self.videoconvert)
 
-        self.pipeline.set_state(Gst.State.PLAYING)
+        if self.h264dec_factory.get_name() == 'vaapih264dec':
+            # strange bugs when using vaapih264dec with DMABuf
+            # gst-launch-1.0 -v videotestsrc ! 'video/x-raw,width=640,height=480' ! x264enc ! vaapih264dec ! glupload ! glcolorconvert ! gtkglsink
+            # - /GstPipeline:pipeline0/GstVaapiDecode_h264:vaapidecode_h264-0.GstPad:src: caps = video/x-raw(memory:DMABuf), format=(string)NV12, ...
+            # - after a few frames: Bail out! ERROR:../gstreamer-vaapi/gst/vaapi/gstvaapivideobufferpool.c:363:vaapi_buffer_pool_lookup_dma_mem: assertion failed: (mem)
+            # gst-launch-1.0 -v videotestsrc ! 'video/x-raw,width=640,height=480' ! x264enc ! vaapih264dec ! 'video/x-raw' ! glupload ! glcolorconvert ! gtkglsink
+            # - /GstPipeline:pipeline0/GstVaapiDecode_h264:vaapidecode_h264-0.GstPad:src: caps = video/x-raw, format=(string)NV12, ...
+            # - works fine
+            #
+            # maybe has something to do with this? https://gitlab.freedesktop.org/gstreamer/gstreamer-vaapi/-/merge_requests/393
+
+            self.post_h264dec = Gst.ElementFactory.make('capsfilter')
+            self.post_h264dec.set_property('caps', Gst.Caps.from_string('video/x-raw'))  # do not use DMABuf
+            self.pipeline.add(self.post_h264dec)
+            self.h264dec.link(self.post_h264dec)
+            self.post_h264dec.link(self.glupload)
+        else:
+            self.post_h264dec = None
+            self.h264dec.link(self.glupload)
 
     def set_overlay_class(self, overlay_cls):
         if overlay_cls is None:
@@ -415,7 +441,10 @@ class VideoAppWindow(Gtk.ApplicationWindow):
         width = settings.get('width') or 320
         height = settings.get('height') or 240
         framerate = settings.get('framerate') or 30
-        default_h264_decoder = Gst.ElementFactory.find(settings.get('h264_decoder') or 'avdec_h264')  # avdec_h264 is software h264 decoder
+        selected_h264_decoder_name = settings.get('h264_decoder') or 'avdec_h264'  # avdec_h264 is software h264 decoder
+        selected_h264_decoder = Gst.ElementFactory.find(selected_h264_decoder_name)
+        if selected_h264_decoder is None:
+            raise ValueError(f'could not find selected h264 encoder "{selected_h264_decoder_name}"')
         annotation_mode_str = settings.get('annotation_mode') or 'none'
         drc_level_str = settings.get('drc_level') or 'off'
         target_birtate_str = settings.get('target_bitrate') or '1M'
@@ -580,7 +609,7 @@ class VideoAppWindow(Gtk.ApplicationWindow):
 
         # video
 
-        self.video = VideoWidget(h264dec_factory=default_h264_decoder, expand=True)
+        self.video = VideoWidget(width, height, h264dec_factory=selected_h264_decoder, expand=True)
         self.grid.attach_next_to(self.video, remote_bar, Gtk.PositionType.BOTTOM, 1, 1)
 
         # local bar (controls local video processing)
@@ -616,7 +645,7 @@ class VideoAppWindow(Gtk.ApplicationWindow):
             h264_decoders_store.append([h264_decoder.get_name(), h264_decoder])
         h264_decoder_combobox = Gtk.ComboBox.new_with_model(h264_decoders_store)
         for i, h264_decoder_info in enumerate(h264_decoders_store):
-            if h264_decoder_info[1] == default_h264_decoder:
+            if h264_decoder_info[1] == selected_h264_decoder:
                 h264_decoder_combobox.set_active(i)
                 break
         h264_decoder_renderer = Gtk.CellRendererText()
@@ -694,7 +723,6 @@ class VideoAppWindow(Gtk.ApplicationWindow):
         local_pipeline_latency_ms = local_pipeline_latency_sum / local_stats_buffer_len * 1e3 if local_stats_buffer_len > 0 else 0
         self.local_stats_label.set_label(f'{local_pipeline_latency_ms:.1f} ms pipeline')
 
-
     def on_ip_address_changed(self, entry):
         # when the user types in the ip address textbox
         ip_address = entry.get_text()
@@ -705,6 +733,7 @@ class VideoAppWindow(Gtk.ApplicationWindow):
         width, height, display_str = combobox.get_model()[combobox.get_active_iter()]
         logger.info(f'resolution changed width {width} height {height}')
         self.remote_control.resolution_changed(width, height)
+        self.video.change_vid_dimensions(width, height)
 
     def on_framerate_changed(self, combobox):
         framerate, display_str = combobox.get_model()[combobox.get_active_iter()]

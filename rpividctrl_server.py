@@ -229,7 +229,11 @@ class Main:
     def generate_h264enc_controls(self):
         # `v4l2-ctl -L` to list controls
         return {
-            'video_bitrate': self.target_bitrate
+            'video_bitrate': self.target_bitrate,
+            'repeat_sequence_header': 1,  # without repeat_sequence_header=True, when client switches decoders, the
+                                          # image will freeze until a new h264 encoder element is created
+                                          # (for, by example, changing resolution)
+            'video_bitrate_mode': 1  # 0==Variable Bitrate, 1==Constant Bitrate
         }
 
     def generate_camsrc_caps(self):
@@ -279,7 +283,6 @@ class Main:
     def create_camera_element(self):
         logger.info('create camera element')
         self.camsrc = Gst.ElementFactory.make('v4l2src')
-        #self.camsrc.set_property('io-mode', 'userptr')  # fastest, found by trial and error
         if self.image_processing:
             self.camsrc.set_property('extra_controls', dict_to_struct(self.generate_camsrc_controls()))
         else:
