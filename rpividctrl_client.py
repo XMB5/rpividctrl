@@ -326,7 +326,6 @@ class RemoteControl:
         logger.info('sock connected')
         self.set_status(RemoteControl.STATUS_CONNECTED)
         self.sock_manager.cork()
-        self.send_stats()
         # self.send_annotation_mode()
         # self.send_drc_level()
         self.send_target_bitrate()

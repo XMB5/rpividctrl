@@ -135,7 +135,7 @@ class MessageReader:
         elif message_type == MessageType.SET_TARGET_BITRATE:
             info['target_bitrate'] = struct.unpack('>I', content)[0]
         elif message_type == MessageType.STATS_RESPONSE:
-            info['stats_tuple'] = struct.unpack('3f', content)
+            info['stats_tuple'] = struct.unpack('4f', content)
 
         return info
 
@@ -173,7 +173,7 @@ class MessageBuilder:
 
     @staticmethod
     def stats_response(stats_tuple):
-        return MessageBuilder.STATS_RESPONSE_HEADER + struct.pack('3f', *stats_tuple)
+        return MessageBuilder.STATS_RESPONSE_HEADER + struct.pack('4f', *stats_tuple)
 
 
 MessageBuilder.MESSAGE_LEN_1 = MessageBuilder.len_to_bytes(1)
@@ -276,7 +276,7 @@ class SocketManager:
 
     def sendall(self, bytes_to_send):
         if self.cork_buffer is None:
-            self.sock.sendall(bytes_to_send)
+            self.sock.sendall(bytes_to_send)  # TODO: don't use sendall, instead use chunk queue like in c++ version
         else:
             self.cork_buffer.append(bytes_to_send)
 

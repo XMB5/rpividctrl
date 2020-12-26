@@ -218,7 +218,7 @@ class Main:
         # TODO: fix queue stats
         queue0_level = 0 #self.queue0.get_property('current-level-buffers')
         queue1_level = 0 #self.queue1.get_property('current-level-buffers')
-        self.stats_buffer.append((last_pipeline_latency, queue0_level, queue1_level))
+        self.stats_buffer.append((last_pipeline_latency, queue0_level, queue1_level, 0.0))
 
     def generate_camsrc_controls(self):
         # `v4l2-ctl -L` to list controls
@@ -296,6 +296,7 @@ class Main:
         logger.info('destory camera element')
         self.pipeline.remove(self.camsrc)
         self.camsrc.set_state(Gst.State.NULL)
+        self.camsrc.unlink(self.camsrc_caps_filter)
         self.camsrc = None
         self.width = None
         self.height = None
